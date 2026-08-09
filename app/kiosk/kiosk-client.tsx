@@ -616,20 +616,30 @@ function MemberCard({ member, pending, onTap }: { member: Member; pending: boole
 // ---- Splash view ----------------------------------------------------------
 
 function SplashView({ info, undoing, onUndo }: { info: SplashInfo; undoing: boolean; onUndo: () => void }) {
+  // React's `autoFocus` prop only triggers an implicit .focus() call for a
+  // hardcoded set of host elements (button/input/select/textarea) — it's a
+  // no-op on arbitrary elements like h1. So the heading needs a real
+  // ref + mount effect instead, verified live (activeElement now lands on
+  // the h1, not <body>).
+  const headingRef = useRef<HTMLHeadingElement>(null);
+  useEffect(() => {
+    headingRef.current?.focus();
+  }, []);
+
   return (
     <main className="flex flex-1 flex-col items-center justify-center px-6 text-center">
       <div className="flex h-24 w-24 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/40">
         <CheckMark className="h-12 w-12 text-green-600 dark:text-green-400" />
       </div>
-      {/* tabIndex + autoFocus: this heading is the whole point of the splash
+      {/* tabIndex + ref-focus: this heading is the whole point of the splash
           screen, so it (not just the body) gets focus — screen readers on a
           shared kiosk announce "You're in, {name}" immediately rather than
           silently landing on <body>. outline-none because this is a
           programmatic focus-on-mount, not a keyboard tab stop; there's
           nothing to show a focus ring in response to. */}
       <h1
+        ref={headingRef}
         tabIndex={-1}
-        autoFocus
         className="mt-6 text-3xl font-semibold tracking-tight text-neutral-900 outline-none sm:text-4xl dark:text-neutral-50"
       >
         You&apos;re in, {firstNameOf(info.fullName)}
