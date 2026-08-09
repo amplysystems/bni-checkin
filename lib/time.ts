@@ -13,7 +13,7 @@ export function meetingStartUtc(dateStr: string): Date {
 
 export function greetingFor(now: Date): string {
   const hour = Number(new Intl.DateTimeFormat('en-US', {
-    timeZone: CHAPTER_TZ, hour: 'numeric', hour12: false,
+    timeZone: CHAPTER_TZ, hour: 'numeric', hourCycle: 'h23',
   }).format(now));
   if (hour < 12) return 'Good morning';
   if (hour < 17) return 'Good afternoon';
