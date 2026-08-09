@@ -248,7 +248,10 @@ export default function KioskClient() {
       showToast(GENERIC_ERROR);
       return;
     }
-    showToast('Check-in removed');
+    // The route can 200 with undone: false (already voided, cross-day, or a
+    // bad id) — that's not a network/request failure, just a no-op. Either
+    // way we return to grid and refresh so the roster reflects true state.
+    showToast(result.data.undone ? 'Check-in removed' : "Couldn't undo — see an organizer");
     resetToGrid();
     fetchRoster();
   }, [showToast, resetToGrid, fetchRoster]);
@@ -574,7 +577,7 @@ function SplashView({ info, undoing, onUndo }: { info: SplashInfo; undoing: bool
         type="button"
         onClick={onUndo}
         disabled={undoing}
-        className="mt-10 min-h-[44px] px-4 text-sm font-medium text-[#CF2030] transition active:scale-[0.98] disabled:opacity-50"
+        className="mt-6 flex min-h-[56px] items-center justify-center px-6 text-sm font-medium text-[#CF2030] transition active:scale-[0.98] disabled:opacity-50"
       >
         Not you? Undo
       </button>
@@ -612,7 +615,7 @@ function VisitorFormView({
         <button
           type="button"
           onClick={onBack}
-          className="mt-6 flex min-h-[44px] items-center text-sm font-medium text-neutral-500 transition active:scale-[0.98] dark:text-neutral-400"
+          className="mt-4 flex min-h-[48px] items-center text-sm font-medium text-neutral-500 transition active:scale-[0.98] dark:text-neutral-400"
         >
           ← Back
         </button>
@@ -723,7 +726,7 @@ function VisitorFormView({
             <button
               type="button"
               onClick={onFindReturning}
-              className="mt-4 min-h-[44px] w-full text-sm font-medium text-neutral-500 transition active:scale-[0.98] dark:text-neutral-400"
+              className="mt-4 flex min-h-[48px] w-full items-center justify-center text-sm font-medium text-neutral-500 transition active:scale-[0.98] dark:text-neutral-400"
             >
               Been here before? Find your name
             </button>
@@ -762,7 +765,7 @@ function ReturningSearchView({
         <button
           type="button"
           onClick={onBack}
-          className="mt-6 flex min-h-[44px] items-center text-sm font-medium text-neutral-500 transition active:scale-[0.98] dark:text-neutral-400"
+          className="mt-4 flex min-h-[48px] items-center text-sm font-medium text-neutral-500 transition active:scale-[0.98] dark:text-neutral-400"
         >
           ← Back to visitor form
         </button>
