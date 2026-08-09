@@ -1,7 +1,7 @@
 import { and, eq, isNull, ilike, or, sql, type SQL } from 'drizzle-orm';
 import { attendance, memberships, people } from '@/db/schema';
 import type { Db } from '@/lib/db';
-import { checkIn } from '@/lib/checkins';
+import { checkIn, isUniqueViolation } from '@/lib/checkins';
 
 export type VisitorInput = {
   fullName: string; industry: string | null; company: string | null;
@@ -45,18 +45,41 @@ export async function registerVisitor(db: Db, input: VisitorInput) {
     return { person, attendance: replayed[0], deduped: true, voided: replayed[0].voidedAt !== null };
   }
 
-  const [person] = await db.insert(people).values({
-    fullName: input.fullName.trim(),
-    industry: input.industry === null ? null : input.industry.trim(),
-    company: trimOrNull(input.company),
-    email: input.email.trim(),
-    phone: trimOrNull(input.phone),
-  }).returning();
-  await db.insert(memberships).values({ personId: person.id, status: 'visitor' });
-  const result = await checkIn(db, {
-    personId: person.id, clientOpId: input.clientOpId, source: 'kiosk', now: input.now,
-  });
-  return { person, ...result };
+  // The pre-check above is safe against sequential retries but not against
+  // two truly concurrent calls sharing a clientOpId: both can pass it before
+  // either has inserted anything. Each then creates its own person+membership
+  // and races checkIn() on attendance.client_op_id's unique constraint. The
+  // loser's checkIn() insert throws a raw 23505 (its own catch only re-reads
+  // by personId+meetingId, which can't find a winner row that belongs to a
+  // different personId). Catch that here, re-run the opId lookup to fetch the
+  // winner, and clean up the orphan person+membership this losing attempt
+  // created rather than leaving it behind.
+  let orphan: typeof people.$inferSelect | undefined;
+  try {
+    const [person] = await db.insert(people).values({
+      fullName: input.fullName.trim(),
+      industry: input.industry === null ? null : input.industry.trim(),
+      company: trimOrNull(input.company),
+      email: input.email.trim(),
+      phone: trimOrNull(input.phone),
+    }).returning();
+    orphan = person;
+    await db.insert(memberships).values({ personId: person.id, status: 'visitor' });
+    const result = await checkIn(db, {
+      personId: person.id, clientOpId: input.clientOpId, source: 'kiosk', now: input.now,
+    });
+    return { person, ...result };
+  } catch (err) {
+    if (!isUniqueViolation(err)) throw err;
+    const rewon = await db.select().from(attendance).where(eq(attendance.clientOpId, input.clientOpId));
+    if (!rewon[0]) throw err;
+    if (orphan) {
+      await db.delete(memberships).where(eq(memberships.personId, orphan.id));
+      await db.delete(people).where(eq(people.id, orphan.id));
+    }
+    const [winner] = await db.select().from(people).where(eq(people.id, rewon[0].personId));
+    return { person: winner, attendance: rewon[0], deduped: true, voided: rewon[0].voidedAt !== null };
+  }
 }
 
 // Escapes LIKE/ILIKE metacharacters (Postgres' default escape char is `\`)

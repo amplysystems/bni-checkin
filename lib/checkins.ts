@@ -36,7 +36,7 @@ async function activeAttendance(db: Db, personId: string, meetingId: string) {
 // Postgres unique_violation. Drivers nest this differently: neon-http/pg
 // surface `code` directly on the thrown error, while drizzle's pglite
 // wrapper puts the original pg error one level down on `.cause`. Check both.
-function isUniqueViolation(err: unknown): boolean {
+export function isUniqueViolation(err: unknown): boolean {
   const code = (err as { code?: string } | undefined)?.code;
   if (code === '23505') return true;
   const causeCode = (err as { cause?: { code?: string } } | undefined)?.cause?.code;
