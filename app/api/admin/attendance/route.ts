@@ -39,9 +39,12 @@ export async function POST(req: Request) {
       const r = await checkIn(db, {
         personId: parsed.data.personId, clientOpId: crypto.randomUUID(), source: by,
       });
-      return Response.json({ attendance: r.attendance });
+      return Response.json({ attendance: r.attendance, deduped: r.deduped });
     } catch (e) {
-      if (e instanceof CheckInError) return Response.json({ error: e.code }, { status: 400 });
+      if (e instanceof CheckInError) {
+        const status = e.code === 'op_conflict' ? 409 : 400;
+        return Response.json({ error: e.code }, { status });
+      }
       throw e;
     }
   }
