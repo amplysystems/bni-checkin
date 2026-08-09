@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm';
 import { createTestDb, type TestDb } from './helpers/db';
 import { people, meetings, attendance, settings, memberships } from '@/db/schema';
 import { checkIn, voidCheckIn, kioskRoster, CheckInError } from '@/lib/checkins';
+import { getOrCreateMeetingFor } from '@/lib/meetings';
 import { seed } from '../scripts/seed';
 
 describe('attendance schema constraints', () => {
@@ -198,5 +199,35 @@ describe('checkIn', () => {
     ).catch((e) => e);
     expect(err).toBeInstanceOf(CheckInError);
     expect((err as CheckInError).code).toBe('person_deactivated');
+  });
+
+  it('rejects a replayed clientOpId claimed by a different personId with CheckInError(op_conflict)', async () => {
+    const jason = await personByName('Jason Barrios');
+    const mike = await personByName('Mike Anderson');
+    await checkIn(db, { personId: jason.id, clientOpId: 'shared-op', source: 'kiosk', now: NOW });
+
+    const err = await checkIn(
+      db, { personId: mike.id, clientOpId: 'shared-op', source: 'kiosk', now: NOW },
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(CheckInError);
+    expect((err as CheckInError).code).toBe('op_conflict');
+  });
+
+  it('voidCheckIn scoped to a meetingId only voids that meeting\'s attendance row', async () => {
+    const jason = await personByName('Jason Barrios');
+    const a = await checkIn(db, { personId: jason.id, clientOpId: 'scope-1', source: 'kiosk', now: NOW });
+    const meeting = await getOrCreateMeetingFor(db, NOW);
+    const otherMeeting = await getOrCreateMeetingFor(db, new Date(NOW.getTime() + 7 * 24 * 60 * 60 * 1000));
+
+    const wrongScope = await voidCheckIn(
+      db, { attendanceId: a.attendance.id, by: 'kiosk', meetingId: otherMeeting.id },
+    );
+    expect(wrongScope).toBeNull();
+
+    const rightScope = await voidCheckIn(
+      db, { attendanceId: a.attendance.id, by: 'kiosk', meetingId: meeting.id },
+    );
+    expect(rightScope).not.toBeNull();
+    expect(rightScope!.voidedAt).toBeTruthy();
   });
 });

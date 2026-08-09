@@ -3,12 +3,12 @@ import { getDb } from '@/lib/db';
 import { registerVisitor, suggestMatches } from '@/lib/visitors';
 
 const Body = z.object({
-  fullName: z.string().trim().min(2),
-  industry: z.string().trim().min(2),
-  company: z.string().trim().nullable().optional().default(null),
-  email: z.string().trim().email(),
-  phone: z.string().trim().nullable().optional().default(null),
-  clientOpId: z.string().min(8),
+  fullName: z.string().trim().min(2).max(200),
+  industry: z.string().trim().min(2).max(200),
+  company: z.string().trim().max(200).nullable().optional().default(null),
+  email: z.string().trim().max(320).email(),
+  phone: z.string().trim().max(50).nullable().optional().default(null),
+  clientOpId: z.string().min(8).max(128),
   confirmedNew: z.boolean().optional().default(false),
 });
 

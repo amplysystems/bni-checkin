@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { getDb } from '@/lib/db';
 import { checkIn, CheckInError } from '@/lib/checkins';
 
-const Body = z.object({ personId: z.string().uuid(), clientOpId: z.string().min(8) });
+const Body = z.object({ personId: z.string().uuid(), clientOpId: z.string().min(8).max(128) });
 
 export async function POST(req: Request) {
   const parsed = Body.safeParse(await req.json().catch(() => null));
@@ -15,7 +15,10 @@ export async function POST(req: Request) {
       visitNumber: r.attendance.visitNumber,
     });
   } catch (e) {
-    if (e instanceof CheckInError) return Response.json({ error: e.code }, { status: 400 });
+    if (e instanceof CheckInError) {
+      const status = e.code === 'op_conflict' ? 409 : 400;
+      return Response.json({ error: e.code }, { status });
+    }
     throw e;
   }
 }

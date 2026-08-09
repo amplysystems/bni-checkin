@@ -11,7 +11,7 @@ export type CheckInInput = {
 };
 
 export class CheckInError extends Error {
-  constructor(public code: 'person_not_found' | 'person_deactivated') { super(code); }
+  constructor(public code: 'person_not_found' | 'person_deactivated' | 'op_conflict') { super(code); }
 }
 
 async function resolveKind(db: Db, personId: string): Promise<'member' | 'leadership' | 'visitor'> {
@@ -50,10 +50,15 @@ export async function checkIn(db: Db, input: CheckInInput) {
   // Unfiltered by design: the void is authoritative for a replayed
   // clientOpId. A stale duplicate must never resurrect a check-in or attempt
   // a fresh insert (which would violate the total clientOpId unique
-  // constraint anyway) — it just reports back what actually happened.
+  // constraint anyway) — it just reports back what actually happened. But if
+  // the opId is claimed by a DIFFERENT personId than this call's, that's not
+  // a benign replay — it's either a client bug (reusing a stale opId for a
+  // new tap) or two callers racing on a shared opId (registerVisitor reconciles
+  // that internally). Refuse to silently hand back the other person's row.
   const replayed = await db.select().from(attendance)
     .where(eq(attendance.clientOpId, input.clientOpId));
   if (replayed[0]) {
+    if (replayed[0].personId !== input.personId) throw new CheckInError('op_conflict');
     return { attendance: replayed[0], deduped: true, voided: replayed[0].voidedAt !== null };
   }
 
@@ -95,10 +100,19 @@ export async function checkIn(db: Db, input: CheckInInput) {
   }
 }
 
-export async function voidCheckIn(db: Db, { attendanceId, by }: { attendanceId: string; by: string }) {
+// meetingId is optional so the admin path (Task 9) can void any date's row;
+// the kiosk route always passes today's meeting id to scope voids to
+// same-day only — otherwise a harvested attendanceId could void any date's
+// check-in from a kiosk tap days later.
+export async function voidCheckIn(
+  db: Db,
+  { attendanceId, by, meetingId }: { attendanceId: string; by: string; meetingId?: string },
+) {
+  const conditions = [eq(attendance.id, attendanceId), isNull(attendance.voidedAt)];
+  if (meetingId) conditions.push(eq(attendance.meetingId, meetingId));
   const [row] = await db.update(attendance)
     .set({ voidedAt: new Date(), voidedBy: by })
-    .where(and(eq(attendance.id, attendanceId), isNull(attendance.voidedAt)))
+    .where(and(...conditions))
     .returning();
   return row ?? null;
 }

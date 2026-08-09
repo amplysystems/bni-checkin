@@ -1,7 +1,7 @@
 import { and, eq, isNull, ilike, or, sql, type SQL } from 'drizzle-orm';
 import { attendance, memberships, people } from '@/db/schema';
 import type { Db } from '@/lib/db';
-import { checkIn, isUniqueViolation } from '@/lib/checkins';
+import { checkIn, isUniqueViolation, CheckInError } from '@/lib/checkins';
 
 export type VisitorInput = {
   fullName: string; industry: string | null; company: string | null;
@@ -34,6 +34,23 @@ export async function suggestMatches(db: Db, q: { email: string; fullName: strin
   )).limit(8);
 }
 
+// Deletes a losing race attempt's person+membership row. Logs and rethrows
+// on failure rather than swallowing it — a failed cleanup leaves an orphan,
+// but silently returning success would hide that from the caller.
+async function deleteOrphan(db: Db, personId: string) {
+  try {
+    await db.delete(memberships).where(eq(memberships.personId, personId));
+    await db.delete(people).where(eq(people.id, personId));
+  } catch (cleanupErr) {
+    console.error('registerVisitor: failed to delete orphan person/membership', { personId, cleanupErr });
+    throw cleanupErr;
+  }
+}
+
+function isOpRaceLoss(err: unknown): boolean {
+  return isUniqueViolation(err) || (err instanceof CheckInError && err.code === 'op_conflict');
+}
+
 export async function registerVisitor(db: Db, input: VisitorInput) {
   // Idempotent on clientOpId: a kiosk retry must not create a second
   // person/membership. Check for a prior attendance row up front, before any
@@ -48,12 +65,15 @@ export async function registerVisitor(db: Db, input: VisitorInput) {
   // The pre-check above is safe against sequential retries but not against
   // two truly concurrent calls sharing a clientOpId: both can pass it before
   // either has inserted anything. Each then creates its own person+membership
-  // and races checkIn() on attendance.client_op_id's unique constraint. The
-  // loser's checkIn() insert throws a raw 23505 (its own catch only re-reads
-  // by personId+meetingId, which can't find a winner row that belongs to a
-  // different personId). Catch that here, re-run the opId lookup to fetch the
-  // winner, and clean up the orphan person+membership this losing attempt
-  // created rather than leaving it behind.
+  // and races checkIn() on attendance.client_op_id's unique constraint. Two
+  // interleavings are possible for the loser's checkIn() call:
+  //  (a) it loses at insert time — a raw 23505 (isUniqueViolation), or
+  //  (b) the winner has already fully committed by the time the loser's
+  //      checkIn() runs its own opId pre-check, so checkIn() throws
+  //      CheckInError('op_conflict') instead of ever reaching the insert.
+  // Both are caught here, re-run the opId lookup to fetch the winner, and
+  // clean up the orphan person+membership this losing attempt created rather
+  // than leaving it behind.
   let orphan: typeof people.$inferSelect | undefined;
   try {
     const [person] = await db.insert(people).values({
@@ -68,15 +88,22 @@ export async function registerVisitor(db: Db, input: VisitorInput) {
     const result = await checkIn(db, {
       personId: person.id, clientOpId: input.clientOpId, source: 'kiosk', now: input.now,
     });
+
+    // Defense in depth: interleaving (b) above is expected to throw
+    // op_conflict rather than return here, but if checkIn() ever reports a
+    // dedupe for a DIFFERENT personId without throwing, treat it the same
+    // way rather than handing back a person/attendance mismatch.
+    if (result.deduped && result.attendance.personId !== person.id) {
+      await deleteOrphan(db, person.id);
+      const [winner] = await db.select().from(people).where(eq(people.id, result.attendance.personId));
+      return { person: winner, ...result };
+    }
     return { person, ...result };
   } catch (err) {
-    if (!isUniqueViolation(err)) throw err;
+    if (!isOpRaceLoss(err)) throw err;
     const rewon = await db.select().from(attendance).where(eq(attendance.clientOpId, input.clientOpId));
     if (!rewon[0]) throw err;
-    if (orphan) {
-      await db.delete(memberships).where(eq(memberships.personId, orphan.id));
-      await db.delete(people).where(eq(people.id, orphan.id));
-    }
+    if (orphan) await deleteOrphan(db, orphan.id);
     const [winner] = await db.select().from(people).where(eq(people.id, rewon[0].personId));
     return { person: winner, attendance: rewon[0], deduped: true, voided: rewon[0].voidedAt !== null };
   }
