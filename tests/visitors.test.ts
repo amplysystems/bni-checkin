@@ -70,4 +70,44 @@ describe('visitor flow', () => {
     const memberHits = await returningSearch(db, 'jason');
     expect(memberHits).toHaveLength(0);
   });
+
+  it('registerVisitor is idempotent on clientOpId replay — no duplicate person/membership', async () => {
+    const r1 = await registerVisitor(db, {
+      fullName: 'Terry Newman', industry: 'Roofing', company: 'Newman Roofing',
+      email: 'terry@newmanroofing.com', phone: null, clientOpId: 'v-8', now: NOW,
+    });
+    const r2 = await registerVisitor(db, {
+      fullName: 'Terry Newman', industry: 'Roofing', company: 'Newman Roofing',
+      email: 'terry@newmanroofing.com', phone: null, clientOpId: 'v-8', now: NOW,
+    });
+    expect(r2.person.id).toBe(r1.person.id);
+    expect(r2.attendance.id).toBe(r1.attendance.id);
+    expect(r2.deduped).toBe(true);
+    const all = await db.select().from(people);
+    expect(all.filter((p) => p.email === 'terry@newmanroofing.com').length).toBe(1);
+  });
+
+  it('returningSearch short-circuits on short or pure-metacharacter queries', async () => {
+    await registerVisitor(db, {
+      fullName: 'Dana Whitfield', industry: 'Commercial insurance', company: null,
+      email: 'dana@whitfieldgroup.com', phone: null, clientOpId: 'v-9', now: NOW,
+    });
+    await registerVisitor(db, {
+      fullName: 'Rob Feldman', industry: 'Landscaping', company: null,
+      email: 'rob@feldmanlawn.com', phone: null, clientOpId: 'v-10', now: NOW,
+    });
+    expect(await returningSearch(db, '%')).toEqual([]);
+    expect(await returningSearch(db, '_')).toEqual([]);
+    expect(await returningSearch(db, '')).toEqual([]);
+  });
+
+  it('suggestMatches: a query matching both email and name returns exactly one row with only public fields', async () => {
+    await registerVisitor(db, {
+      fullName: 'Dana Whitfield', industry: 'Commercial insurance', company: 'Whitfield Group',
+      email: 'dana@whitfieldgroup.com', phone: null, clientOpId: 'v-11', now: NOW,
+    });
+    const s = await suggestMatches(db, { email: 'dana@whitfieldgroup.com', fullName: 'Dana Whitfield' });
+    expect(s).toHaveLength(1);
+    expect(Object.keys(s[0]).sort()).toEqual(['company', 'fullName', 'id', 'industry']);
+  });
 });
