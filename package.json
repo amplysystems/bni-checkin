@@ -10,7 +10,10 @@
     "test": "vitest run",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "drizzle-kit migrate",
-    "seed": "npx tsx scripts/seed.ts"
+    "seed": "tsx scripts/seed.ts"
+  },
+  "engines": {
+    "node": ">=20.9"
   },
   "dependencies": {
     "@auth/drizzle-adapter": "^1.11.3",
@@ -26,6 +29,7 @@
   },
   "devDependencies": {
     "@electric-sql/pglite": "^0.5.4",
+    "@netlify/plugin-nextjs": "^5.15.13",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",
