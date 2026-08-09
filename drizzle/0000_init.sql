@@ -24,7 +24,8 @@ CREATE TABLE "attendance" (
 	"voided_at" timestamp with time zone,
 	"voided_by" text,
 	"client_op_id" text,
-	CONSTRAINT "attendance_client_op_id_unique" UNIQUE("client_op_id")
+	CONSTRAINT "attendance_client_op_id_unique" UNIQUE("client_op_id"),
+	CONSTRAINT "attendance_kind_check" CHECK ("attendance"."kind" IN ('member', 'leadership', 'visitor'))
 );
 --> statement-breakpoint
 CREATE TABLE "email_events" (
@@ -52,7 +53,9 @@ CREATE TABLE "email_messages" (
 	"sent_at" timestamp with time zone,
 	"error" text,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "email_messages_send_key_unique" UNIQUE("send_key")
+	CONSTRAINT "email_messages_send_key_unique" UNIQUE("send_key"),
+	CONSTRAINT "email_messages_type_check" CHECK ("email_messages"."type" IN ('leadership_report', 'visitor_thankyou')),
+	CONSTRAINT "email_messages_state_check" CHECK ("email_messages"."state" IN ('draft', 'awaiting_approval', 'approved', 'scheduled', 'sending', 'sent', 'failed'))
 );
 --> statement-breakpoint
 CREATE TABLE "meetings" (
@@ -62,7 +65,8 @@ CREATE TABLE "meetings" (
 	"status" text DEFAULT 'scheduled' NOT NULL,
 	"title" text,
 	"notes" text,
-	CONSTRAINT "meetings_meeting_date_unique" UNIQUE("meeting_date")
+	CONSTRAINT "meetings_meeting_date_unique" UNIQUE("meeting_date"),
+	CONSTRAINT "meetings_status_check" CHECK ("meetings"."status" IN ('scheduled', 'canceled', 'special'))
 );
 --> statement-breakpoint
 CREATE TABLE "memberships" (
@@ -70,7 +74,8 @@ CREATE TABLE "memberships" (
 	"person_id" uuid NOT NULL,
 	"status" text NOT NULL,
 	"started_at" timestamp with time zone DEFAULT now() NOT NULL,
-	"ended_at" timestamp with time zone
+	"ended_at" timestamp with time zone,
+	CONSTRAINT "memberships_status_check" CHECK ("memberships"."status" IN ('visitor', 'member', 'former_member'))
 );
 --> statement-breakpoint
 CREATE TABLE "people" (
@@ -90,7 +95,8 @@ CREATE TABLE "person_roles" (
 	"person_id" uuid NOT NULL,
 	"role" text NOT NULL,
 	"granted_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "person_roles_person_id_role_pk" PRIMARY KEY("person_id","role")
+	CONSTRAINT "person_roles_person_id_role_pk" PRIMARY KEY("person_id","role"),
+	CONSTRAINT "person_roles_role_check" CHECK ("person_roles"."role" IN ('leadership', 'admin_contact'))
 );
 --> statement-breakpoint
 CREATE TABLE "sessions" (
@@ -105,7 +111,8 @@ CREATE TABLE "settings" (
 	"report_send_time" text DEFAULT '18:00' NOT NULL,
 	"thankyou_send_time" text DEFAULT '17:30' NOT NULL,
 	"report_recipients" jsonb DEFAULT '[]'::jsonb NOT NULL,
-	"open_seats" jsonb DEFAULT '[]'::jsonb NOT NULL
+	"open_seats" jsonb DEFAULT '[]'::jsonb NOT NULL,
+	CONSTRAINT "settings_singleton" CHECK ("settings"."id" = 1)
 );
 --> statement-breakpoint
 CREATE TABLE "users" (
@@ -132,4 +139,7 @@ ALTER TABLE "email_messages" ADD CONSTRAINT "email_messages_meeting_id_meetings_
 ALTER TABLE "memberships" ADD CONSTRAINT "memberships_person_id_people_id_fk" FOREIGN KEY ("person_id") REFERENCES "public"."people"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "person_roles" ADD CONSTRAINT "person_roles_person_id_people_id_fk" FOREIGN KEY ("person_id") REFERENCES "public"."people"("id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "sessions" ADD CONSTRAINT "sessions_user_id_users_id_fk" FOREIGN KEY ("user_id") REFERENCES "public"."users"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE UNIQUE INDEX "uniq_active_attendance" ON "attendance" USING btree ("person_id","meeting_id") WHERE "attendance"."voided_at" IS NULL;
+CREATE UNIQUE INDEX "uniq_active_attendance" ON "attendance" USING btree ("person_id","meeting_id") WHERE "attendance"."voided_at" IS NULL;--> statement-breakpoint
+CREATE INDEX "idx_attendance_meeting" ON "attendance" USING btree ("meeting_id");--> statement-breakpoint
+CREATE UNIQUE INDEX "uniq_open_membership" ON "memberships" USING btree ("person_id") WHERE "memberships"."ended_at" IS NULL;--> statement-breakpoint
+CREATE INDEX "idx_memberships_person" ON "memberships" USING btree ("person_id");

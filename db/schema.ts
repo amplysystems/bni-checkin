@@ -1,7 +1,7 @@
 import { sql } from 'drizzle-orm';
 import {
   pgTable, text, uuid, timestamp, integer, boolean, date, jsonb,
-  primaryKey, uniqueIndex,
+  primaryKey, uniqueIndex, index, check,
 } from 'drizzle-orm/pg-core';
 import type { AdapterAccountType } from 'next-auth/adapters';
 
@@ -22,7 +22,10 @@ export const personRoles = pgTable('person_roles', {
   personId: uuid('person_id').notNull().references(() => people.id),
   role: text('role', { enum: ['leadership', 'admin_contact'] }).notNull(),
   grantedAt: timestamp('granted_at', { withTimezone: true }).notNull().defaultNow(),
-}, (t) => [primaryKey({ columns: [t.personId, t.role] })]);
+}, (t) => [
+  primaryKey({ columns: [t.personId, t.role] }),
+  check('person_roles_role_check', sql`${t.role} IN ('leadership', 'admin_contact')`),
+]);
 
 export const memberships = pgTable('memberships', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -30,7 +33,11 @@ export const memberships = pgTable('memberships', {
   status: text('status', { enum: ['visitor', 'member', 'former_member'] }).notNull(),
   startedAt: timestamp('started_at', { withTimezone: true }).notNull().defaultNow(),
   endedAt: timestamp('ended_at', { withTimezone: true }),
-});
+}, (t) => [
+  uniqueIndex('uniq_open_membership').on(t.personId).where(sql`${t.endedAt} IS NULL`),
+  index('idx_memberships_person').on(t.personId),
+  check('memberships_status_check', sql`${t.status} IN ('visitor', 'member', 'former_member')`),
+]);
 
 export const meetings = pgTable('meetings', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -39,7 +46,9 @@ export const meetings = pgTable('meetings', {
   status: text('status', { enum: ['scheduled', 'canceled', 'special'] }).notNull().default('scheduled'),
   title: text('title'),
   notes: text('notes'),
-});
+}, (t) => [
+  check('meetings_status_check', sql`${t.status} IN ('scheduled', 'canceled', 'special')`),
+]);
 
 export const attendance = pgTable('attendance', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -48,12 +57,15 @@ export const attendance = pgTable('attendance', {
   kind: text('kind', { enum: ['member', 'leadership', 'visitor'] }).notNull(),
   visitNumber: integer('visit_number'),
   checkedInAt: timestamp('checked_in_at', { withTimezone: true }).notNull().defaultNow(),
+  // free text by design: 'kiosk' or 'admin:{email}' — kiosk check-ins have no authenticated user
   checkedInBy: text('checked_in_by').notNull(),
   voidedAt: timestamp('voided_at', { withTimezone: true }),
   voidedBy: text('voided_by'),
   clientOpId: text('client_op_id').unique(),
 }, (t) => [
   uniqueIndex('uniq_active_attendance').on(t.personId, t.meetingId).where(sql`${t.voidedAt} IS NULL`),
+  index('idx_attendance_meeting').on(t.meetingId),
+  check('attendance_kind_check', sql`${t.kind} IN ('member', 'leadership', 'visitor')`),
 ]);
 
 export const emailMessages = pgTable('email_messages', {
@@ -61,7 +73,7 @@ export const emailMessages = pgTable('email_messages', {
   sendKey: text('send_key').notNull().unique(),
   type: text('type', { enum: ['leadership_report', 'visitor_thankyou'] }).notNull(),
   meetingId: uuid('meeting_id').references(() => meetings.id),
-  recipients: jsonb('recipients').notNull(),
+  recipients: jsonb('recipients').$type<string[]>().notNull(),
   subject: text('subject').notNull(),
   bodySnapshot: text('body_snapshot'),
   state: text('state', {
@@ -73,7 +85,13 @@ export const emailMessages = pgTable('email_messages', {
   sentAt: timestamp('sent_at', { withTimezone: true }),
   error: text('error'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
-});
+}, (t) => [
+  check('email_messages_type_check', sql`${t.type} IN ('leadership_report', 'visitor_thankyou')`),
+  check(
+    'email_messages_state_check',
+    sql`${t.state} IN ('draft', 'awaiting_approval', 'approved', 'scheduled', 'sending', 'sent', 'failed')`,
+  ),
+]);
 
 export const emailEvents = pgTable('email_events', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -81,7 +99,7 @@ export const emailEvents = pgTable('email_events', {
   messageId: uuid('message_id').references(() => emailMessages.id),
   eventType: text('event_type').notNull(),
   occurredAt: timestamp('occurred_at', { withTimezone: true }).notNull(),
-  payload: jsonb('payload'),
+  payload: jsonb('payload').$type<unknown>(),
 });
 
 export const settings = pgTable('settings', {
@@ -89,9 +107,11 @@ export const settings = pgTable('settings', {
   approveMode: boolean('approve_mode').notNull().default(true),
   reportSendTime: text('report_send_time').notNull().default('18:00'),
   thankyouSendTime: text('thankyou_send_time').notNull().default('17:30'),
-  reportRecipients: jsonb('report_recipients').notNull().default(sql`'[]'::jsonb`),
-  openSeats: jsonb('open_seats').notNull().default(sql`'[]'::jsonb`),
-});
+  reportRecipients: jsonb('report_recipients').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  openSeats: jsonb('open_seats').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+}, (t) => [
+  check('settings_singleton', sql`${t.id} = 1`),
+]);
 
 export const users = pgTable('users', {
   id: uuid('id').primaryKey().defaultRandom(),
@@ -126,3 +146,8 @@ export const verificationTokens = pgTable('verification_tokens', {
   token: text('token').notNull(),
   expires: timestamp('expires', { withTimezone: true }).notNull(),
 }, (t) => [primaryKey({ columns: [t.identifier, t.token] })]);
+
+export type Person = typeof people.$inferSelect;
+export type Meeting = typeof meetings.$inferSelect;
+export type Attendance = typeof attendance.$inferSelect;
+export type EmailMessage = typeof emailMessages.$inferSelect;

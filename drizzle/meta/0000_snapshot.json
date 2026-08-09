@@ -1,5 +1,5 @@
 {
-  "id": "16044b10-609e-4e2c-b5d8-32af10f5181c",
+  "id": "0fe25231-94bd-4041-81f4-abb884592291",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -194,6 +194,21 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "idx_attendance_meeting": {
+          "name": "idx_attendance_meeting",
+          "columns": [
+            {
+              "expression": "meeting_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -235,7 +250,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "attendance_kind_check": {
+          "name": "attendance_kind_check",
+          "value": "\"attendance\".\"kind\" IN ('member', 'leadership', 'visitor')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.email_events": {
@@ -429,7 +449,16 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "email_messages_type_check": {
+          "name": "email_messages_type_check",
+          "value": "\"email_messages\".\"type\" IN ('leadership_report', 'visitor_thankyou')"
+        },
+        "email_messages_state_check": {
+          "name": "email_messages_state_check",
+          "value": "\"email_messages\".\"state\" IN ('draft', 'awaiting_approval', 'approved', 'scheduled', 'sending', 'sent', 'failed')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.meetings": {
@@ -488,7 +517,12 @@
         }
       },
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "meetings_status_check": {
+          "name": "meetings_status_check",
+          "value": "\"meetings\".\"status\" IN ('scheduled', 'canceled', 'special')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.memberships": {
@@ -528,7 +562,39 @@
           "notNull": false
         }
       },
-      "indexes": {},
+      "indexes": {
+        "uniq_open_membership": {
+          "name": "uniq_open_membership",
+          "columns": [
+            {
+              "expression": "person_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": true,
+          "where": "\"memberships\".\"ended_at\" IS NULL",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "idx_memberships_person": {
+          "name": "idx_memberships_person",
+          "columns": [
+            {
+              "expression": "person_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
       "foreignKeys": {
         "memberships_person_id_people_id_fk": {
           "name": "memberships_person_id_people_id_fk",
@@ -547,7 +613,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "memberships_status_check": {
+          "name": "memberships_status_check",
+          "value": "\"memberships\".\"status\" IN ('visitor', 'member', 'former_member')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.people": {
@@ -676,7 +747,12 @@
       },
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "person_roles_role_check": {
+          "name": "person_roles_role_check",
+          "value": "\"person_roles\".\"role\" IN ('leadership', 'admin_contact')"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.sessions": {
@@ -775,7 +851,12 @@
       "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
-      "checkConstraints": {},
+      "checkConstraints": {
+        "settings_singleton": {
+          "name": "settings_singleton",
+          "value": "\"settings\".\"id\" = 1"
+        }
+      },
       "isRLSEnabled": false
     },
     "public.users": {
