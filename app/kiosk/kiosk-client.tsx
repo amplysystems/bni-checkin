@@ -64,6 +64,29 @@ const emptyVisitorForm: VisitorFormState = {
 const GENERIC_ERROR = "Something went wrong — try again.";
 const VOIDED_MESSAGE = 'Check-in was undone earlier — see an organizer';
 
+// Timing knobs, named so the setTimeout/setInterval calls below read as
+// intent rather than magic numbers.
+const POLL_INTERVAL_MS = 30_000;
+const SPLASH_MS = 5_000;
+const TOAST_MS = 2_500;
+const SEARCH_DEBOUNCE_MS = 250;
+
+// Brand accent. Kept as a single JS constant for reference, but Tailwind's
+// arbitrary-value classes (bg-[#CF2030] etc.) must stay literal strings for
+// its build-time scanner to generate them — a dynamically-interpolated
+// class name is invisible to that scanner and silently produces no CSS. So
+// any usage that needs to react to component state (form-field error
+// highlighting) goes through an inline `style` referencing this constant
+// instead of a dynamic class name; static, always-red usages keep the
+// literal Tailwind class.
+const BRAND_RED = '#CF2030';
+
+// Shared by every visitor-form text input; only the border reacts to
+// validation state, via VISITOR_INPUT_ERROR_STYLE below.
+const VISITOR_INPUT_CLASS =
+  'min-h-[56px] w-full rounded-2xl border bg-white px-5 text-base text-neutral-900 shadow-sm outline-none dark:bg-neutral-900 dark:text-neutral-50 border-neutral-200 focus:border-neutral-400 dark:border-neutral-800 dark:focus:border-neutral-600';
+const VISITOR_INPUT_ERROR_STYLE = { borderColor: BRAND_RED } as const;
+
 // ---- Small pure helpers ---------------------------------------------------
 
 function getInitials(name: string): string {
@@ -151,7 +174,7 @@ export default function KioskClient() {
   const showToast = useCallback((text: string) => {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast({ id: Date.now(), text });
-    toastTimerRef.current = setTimeout(() => setToast(null), 2500);
+    toastTimerRef.current = setTimeout(() => setToast(null), TOAST_MS);
   }, []);
 
   useEffect(() => () => {
@@ -162,6 +185,16 @@ export default function KioskClient() {
   // loadRoster is a pure fetch (no setState) so it's safe to invoke from an
   // effect; fetchRoster wraps it with state updates for use in event
   // handlers (post-mutation refreshes) outside of any effect body.
+  //
+  // rosterRequestIdRef is a monotonic counter shared by every fetch path —
+  // mount/grid-entry, the 30s poll, and post-mutation refreshes. Each fetch
+  // stamps its eventual response with the counter value at issue time;
+  // applyRosterResult discards any response whose stamp no longer matches
+  // the current counter. That keeps a slow poll from clobbering a fresher
+  // mutation-triggered refresh (or vice versa) regardless of resolution
+  // order — only the most recently issued request's response ever gets
+  // applied to state.
+  const rosterRequestIdRef = useRef(0);
 
   const loadRoster = useCallback(async (): Promise<
     { ok: true; data: RosterResponse } | { ok: false }
@@ -175,26 +208,38 @@ export default function KioskClient() {
     }
   }, []);
 
-  const fetchRoster = useCallback(async () => {
-    const result = await loadRoster();
-    if (result.ok) { setRoster(result.data); setRosterError(false); }
-    else setRosterError(true);
-  }, [loadRoster]);
-
-  // Fetches on mount, then polls every 30s while the grid view is active.
-  useEffect(() => {
-    let active = true;
-    async function run() {
-      const result = await loadRoster();
-      if (!active) return;
+  const applyRosterResult = useCallback(
+    (requestId: number, result: { ok: true; data: RosterResponse } | { ok: false }) => {
+      if (requestId !== rosterRequestIdRef.current) return; // superseded by a newer request
       if (result.ok) { setRoster(result.data); setRosterError(false); }
       else setRosterError(true);
+    },
+    [],
+  );
+
+  const fetchRoster = useCallback(async () => {
+    const requestId = ++rosterRequestIdRef.current;
+    const result = await loadRoster();
+    applyRosterResult(requestId, result);
+  }, [loadRoster, applyRosterResult]);
+
+  // Fetches immediately on entering the grid view, then polls every
+  // POLL_INTERVAL_MS while it stays active. Both the initial run() and the
+  // interval are gated behind view === 'grid' so navigating away (splash,
+  // visitor form, returning search) stops the polling entirely.
+  useEffect(() => {
+    if (view !== 'grid') return;
+    let cancelled = false;
+    async function run() {
+      const requestId = ++rosterRequestIdRef.current;
+      const result = await loadRoster();
+      if (cancelled) return;
+      applyRosterResult(requestId, result);
     }
     run();
-    if (view !== 'grid') return () => { active = false; };
-    const id = setInterval(run, 30000);
-    return () => { active = false; clearInterval(id); };
-  }, [view, loadRoster]);
+    const id = setInterval(run, POLL_INTERVAL_MS);
+    return () => { cancelled = true; clearInterval(id); };
+  }, [view, loadRoster, applyRosterResult]);
 
   // ---- View transitions ----
 
@@ -216,7 +261,7 @@ export default function KioskClient() {
 
   useEffect(() => {
     if (view !== 'splash') return;
-    const t = setTimeout(() => resetToGrid(), 5000);
+    const t = setTimeout(() => resetToGrid(), SPLASH_MS);
     return () => clearTimeout(t);
   }, [view, resetToGrid]);
 
@@ -340,7 +385,7 @@ export default function KioskClient() {
       } finally {
         if (!ignore) setReturningLoading(false);
       }
-    }, 250);
+    }, SEARCH_DEBOUNCE_MS);
     return () => { ignore = true; clearTimeout(timer); };
   }, [returningQuery, view]);
 
@@ -443,7 +488,11 @@ export default function KioskClient() {
 
       {toast && (
         <div className="pointer-events-none fixed inset-x-0 bottom-8 flex justify-center px-4">
-          <div className="pointer-events-auto rounded-full bg-neutral-900 px-5 py-3 text-sm font-medium text-white shadow-lg dark:bg-neutral-100 dark:text-neutral-900">
+          <div
+            role="status"
+            aria-live="polite"
+            className="pointer-events-auto rounded-full bg-neutral-900 px-5 py-3 text-sm font-medium text-white shadow-lg dark:bg-neutral-100 dark:text-neutral-900"
+          >
             {toast.text}
           </div>
         </div>
@@ -508,7 +557,8 @@ function GridView({
         <button
           type="button"
           onClick={onOpenVisitorForm}
-          className="mt-10 min-h-[64px] w-full rounded-2xl bg-[#CF2030] px-6 text-lg font-semibold text-white shadow-sm transition active:scale-[0.98]"
+          style={{ backgroundColor: BRAND_RED }}
+          className="mt-10 min-h-[64px] w-full rounded-2xl px-6 text-lg font-semibold text-white shadow-sm transition active:scale-[0.98]"
         >
           First time here? Welcome →
         </button>
@@ -547,7 +597,11 @@ function MemberCard({ member, pending, onTap }: { member: Member; pending: boole
       </span>
       <span className="line-clamp-1 text-sm font-medium text-neutral-900 dark:text-neutral-50">{name}</span>
       {checkedIn ? (
-        <span className="text-xs font-medium text-green-600 dark:text-green-400">
+        // green-700 (not the -600 used above for the avatar) — at 12px text
+        // this label needs the darker shade to clear WCAG AA 4.5:1 in light
+        // mode; the dark-mode pairing (green-400 on a near-black page) was
+        // already compliant, so it's untouched.
+        <span className="text-xs font-medium text-green-700 dark:text-green-400">
           Checked in · {formatTime(member.checkedInAt!)}
         </span>
       ) : (
@@ -567,7 +621,17 @@ function SplashView({ info, undoing, onUndo }: { info: SplashInfo; undoing: bool
       <div className="flex h-24 w-24 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/40">
         <CheckMark className="h-12 w-12 text-green-600 dark:text-green-400" />
       </div>
-      <h1 className="mt-6 text-3xl font-semibold tracking-tight text-neutral-900 sm:text-4xl dark:text-neutral-50">
+      {/* tabIndex + autoFocus: this heading is the whole point of the splash
+          screen, so it (not just the body) gets focus — screen readers on a
+          shared kiosk announce "You're in, {name}" immediately rather than
+          silently landing on <body>. outline-none because this is a
+          programmatic focus-on-mount, not a keyboard tab stop; there's
+          nothing to show a focus ring in response to. */}
+      <h1
+        tabIndex={-1}
+        autoFocus
+        className="mt-6 text-3xl font-semibold tracking-tight text-neutral-900 outline-none sm:text-4xl dark:text-neutral-50"
+      >
         You&apos;re in, {firstNameOf(info.fullName)}
       </h1>
       <p className="mt-2 text-neutral-500 dark:text-neutral-400">
@@ -577,7 +641,8 @@ function SplashView({ info, undoing, onUndo }: { info: SplashInfo; undoing: bool
         type="button"
         onClick={onUndo}
         disabled={undoing}
-        className="mt-6 flex min-h-[56px] items-center justify-center px-6 text-sm font-medium text-[#CF2030] transition active:scale-[0.98] disabled:opacity-50"
+        style={{ color: BRAND_RED }}
+        className="mt-6 flex min-h-[56px] items-center justify-center px-6 text-sm font-medium transition active:scale-[0.98] disabled:opacity-50"
       >
         Not you? Undo
       </button>
@@ -606,9 +671,6 @@ function VisitorFormView({
   onFindReturning: () => void;
   onBack: () => void;
 }) {
-  const errBorder = 'border-[#CF2030] focus:border-[#CF2030]';
-  const okBorder = 'border-neutral-200 focus:border-neutral-400 dark:border-neutral-800 dark:focus:border-neutral-600';
-
   return (
     <main className="flex-1 px-4 pb-12 sm:px-8">
       <div className="mx-auto max-w-lg">
@@ -662,7 +724,10 @@ function VisitorFormView({
             </h1>
 
             {error && (
-              <div className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm text-[#CF2030] dark:bg-red-950/40">
+              <div
+                style={{ color: BRAND_RED }}
+                className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm dark:bg-red-950/40"
+              >
                 {error}
               </div>
             )}
@@ -673,9 +738,11 @@ function VisitorFormView({
                   type="text"
                   required
                   minLength={2}
+                  autoFocus
                   value={form.fullName}
                   onChange={(e) => setForm((f) => ({ ...f, fullName: e.target.value }))}
-                  className={`min-h-[56px] w-full rounded-2xl border bg-white px-5 text-base text-neutral-900 shadow-sm outline-none dark:bg-neutral-900 dark:text-neutral-50 ${error && !nameValid ? errBorder : okBorder}`}
+                  style={error && !nameValid ? VISITOR_INPUT_ERROR_STYLE : undefined}
+                  className={VISITOR_INPUT_CLASS}
                 />
               </Field>
               <Field label="Industry">
@@ -685,7 +752,8 @@ function VisitorFormView({
                   minLength={2}
                   value={form.industry}
                   onChange={(e) => setForm((f) => ({ ...f, industry: e.target.value }))}
-                  className={`min-h-[56px] w-full rounded-2xl border bg-white px-5 text-base text-neutral-900 shadow-sm outline-none dark:bg-neutral-900 dark:text-neutral-50 ${error && !industryValid ? errBorder : okBorder}`}
+                  style={error && !industryValid ? VISITOR_INPUT_ERROR_STYLE : undefined}
+                  className={VISITOR_INPUT_CLASS}
                 />
               </Field>
               <Field label="Company (optional)">
@@ -693,7 +761,7 @@ function VisitorFormView({
                   type="text"
                   value={form.company}
                   onChange={(e) => setForm((f) => ({ ...f, company: e.target.value }))}
-                  className={`min-h-[56px] w-full rounded-2xl border bg-white px-5 text-base text-neutral-900 shadow-sm outline-none dark:bg-neutral-900 dark:text-neutral-50 ${okBorder}`}
+                  className={VISITOR_INPUT_CLASS}
                 />
               </Field>
               <Field label="Work email">
@@ -702,7 +770,8 @@ function VisitorFormView({
                   required
                   value={form.email}
                   onChange={(e) => setForm((f) => ({ ...f, email: e.target.value }))}
-                  className={`min-h-[56px] w-full rounded-2xl border bg-white px-5 text-base text-neutral-900 shadow-sm outline-none dark:bg-neutral-900 dark:text-neutral-50 ${error && !emailValid ? errBorder : okBorder}`}
+                  style={error && !emailValid ? VISITOR_INPUT_ERROR_STYLE : undefined}
+                  className={VISITOR_INPUT_CLASS}
                 />
               </Field>
               <Field label="Phone (optional)">
@@ -710,7 +779,7 @@ function VisitorFormView({
                   type="tel"
                   value={form.phone}
                   onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
-                  className={`min-h-[56px] w-full rounded-2xl border bg-white px-5 text-base text-neutral-900 shadow-sm outline-none dark:bg-neutral-900 dark:text-neutral-50 ${okBorder}`}
+                  className={VISITOR_INPUT_CLASS}
                 />
               </Field>
             </div>
@@ -718,7 +787,8 @@ function VisitorFormView({
             <button
               type="submit"
               disabled={submitting}
-              className="mt-8 min-h-[64px] w-full rounded-2xl bg-[#CF2030] text-lg font-semibold text-white shadow-sm transition active:scale-[0.98] disabled:opacity-60"
+              style={{ backgroundColor: BRAND_RED }}
+              className="mt-8 min-h-[64px] w-full rounded-2xl text-lg font-semibold text-white shadow-sm transition active:scale-[0.98] disabled:opacity-60"
             >
               {submitting ? 'Checking in…' : 'Check in'}
             </button>
