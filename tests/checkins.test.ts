@@ -2,6 +2,8 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { createTestDb, type TestDb } from './helpers/db';
 import { people, meetings, attendance, settings, memberships } from '@/db/schema';
+import { checkIn, voidCheckIn, kioskRoster } from '@/lib/checkins';
+import { seed } from '../scripts/seed';
 
 describe('attendance schema constraints', () => {
   let db: TestDb;
@@ -77,5 +79,70 @@ describe('attendance schema constraints', () => {
     const [second] = await db.insert(memberships)
       .values({ personId, status: 'member' }).returning();
     expect(second.id).not.toBe(openMembership.id);
+  });
+});
+
+describe('checkIn', () => {
+  let db: TestDb;
+  const NOW = new Date('2026-08-12T19:00:00Z');
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seed(db);
+  });
+
+  async function personByName(name: string) {
+    const { eq } = await import('drizzle-orm');
+    const [p] = await db.select().from(people).where(eq(people.fullName, name));
+    return p;
+  }
+
+  it('checks a member in with kind=member', async () => {
+    const jason = await personByName('Jason Barrios');
+    const r = await checkIn(db, { personId: jason.id, clientOpId: 'op-1', source: 'kiosk', now: NOW });
+    expect(r.deduped).toBe(false);
+    expect(r.attendance.kind).toBe('member');
+  });
+
+  it('replaying the same clientOpId is a no-op returning the original row', async () => {
+    const jason = await personByName('Jason Barrios');
+    const a = await checkIn(db, { personId: jason.id, clientOpId: 'op-1', source: 'kiosk', now: NOW });
+    const b = await checkIn(db, { personId: jason.id, clientOpId: 'op-1', source: 'kiosk', now: NOW });
+    expect(b.deduped).toBe(true);
+    expect(b.attendance.id).toBe(a.attendance.id);
+  });
+
+  it('a second tap with a NEW opId still cannot double-check-in', async () => {
+    const jason = await personByName('Jason Barrios');
+    const a = await checkIn(db, { personId: jason.id, clientOpId: 'op-1', source: 'kiosk', now: NOW });
+    const b = await checkIn(db, { personId: jason.id, clientOpId: 'op-2', source: 'kiosk', now: NOW });
+    expect(b.deduped).toBe(true);
+    expect(b.attendance.id).toBe(a.attendance.id);
+  });
+
+  it('void then re-check-in creates a new row and keeps the voided one', async () => {
+    const jason = await personByName('Jason Barrios');
+    const a = await checkIn(db, { personId: jason.id, clientOpId: 'op-1', source: 'kiosk', now: NOW });
+    await voidCheckIn(db, { attendanceId: a.attendance.id, by: 'kiosk' });
+    const b = await checkIn(db, { personId: jason.id, clientOpId: 'op-3', source: 'kiosk', now: NOW });
+    expect(b.attendance.id).not.toBe(a.attendance.id);
+    const all = await db.select().from(attendance);
+    expect(all).toHaveLength(2);
+  });
+
+  it('leadership checks in with kind=leadership', async () => {
+    const carey = await personByName('Carey Rothbardt');
+    const r = await checkIn(db, { personId: carey.id, clientOpId: 'op-4', source: 'kiosk', now: NOW });
+    expect(r.attendance.kind).toBe('leadership');
+  });
+
+  it('kioskRoster returns members with checked-in state and no leadership/visitors in the grid', async () => {
+    const jason = await personByName('Jason Barrios');
+    await checkIn(db, { personId: jason.id, clientOpId: 'op-5', source: 'kiosk', now: NOW });
+    const roster = await kioskRoster(db, NOW);
+    expect(roster.members).toHaveLength(10);
+    const j = roster.members.find((m) => m.fullName === 'Jason Barrios')!;
+    expect(j.checkedInAt).toBeTruthy();
+    expect(roster.members.map((m) => m.fullName)).not.toContain('Carey Rothbardt');
   });
 });
