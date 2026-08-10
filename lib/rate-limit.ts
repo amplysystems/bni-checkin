@@ -146,6 +146,21 @@ export function getClientIp(req: Pick<Request, 'headers'>): string {
     console.warn('rate-limit: x-nf-client-connection-ip missing — falling back to x-forwarded-for');
   }
 
+  // SECURITY NOTE (raised in review of lib/otp.ts's OTP_VERIFY_RATE_LIMIT
+  // consumer, app/admin/login/page.tsx's verifyCode): x-forwarded-for is
+  // caller-supplied and only as trustworthy as whatever untrusted proxy is
+  // in front of this deployment — on any path that reaches this fallback
+  // (i.e. x-nf-client-connection-ip is missing, which "should be ~never in
+  // production" per above but isn't a guarantee this function can enforce),
+  // an attacker can claim a fresh IP on every request and get a fresh
+  // rate-limit bucket every time. Not a behavior change here: getClientIp's
+  // contract has always been "best-effort identifier, not an authenticated
+  // one." What changed is that lib/otp.ts's verifyOtpAndCreateSession no
+  // longer treats this rate limit as the thing making brute force
+  // infeasible — its atomic DELETE...RETURNING claim (one guess per code,
+  // enforced by Postgres regardless of how many requests arrive) is the
+  // primary defense; this IP-keyed limit is correctly just a
+  // defense-in-depth backstop on top of it now.
   const fwd = req.headers.get('x-forwarded-for');
   const first = fwd?.split(',')[0]?.trim();
   if (first && isPlausibleIp(first)) return first;

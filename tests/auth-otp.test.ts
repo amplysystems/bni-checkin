@@ -250,6 +250,67 @@ describe('verifyOtpAndCreateSession', () => {
 
     expect(result.ok).toBe(true);
   });
+
+  // Security review I-1: the original implementation did SELECT then a
+  // separate DELETE (ignoring its rowcount), so two concurrent calls could
+  // both read the same still-present row and each get an independent guess
+  // — defeating the "one guess per code" guarantee under concurrency (e.g.
+  // a spoofed X-Forwarded-For defeating the per-IP rate limit). The fix
+  // makes the claim a single atomic `DELETE ... RETURNING`, which Postgres
+  // serializes: only the winner of the race gets a non-empty `row`. These
+  // tests fail against the old SELECT-then-DELETE shape and pass against
+  // the current DELETE-RETURNING one (verified by hand against both while
+  // fixing this).
+  describe('concurrent claim (atomicity — security review I-1)', () => {
+    it('at most one of two concurrent verifies against the same code succeeds, and the row is gone after', async () => {
+      const db = await createTestDb();
+      const now = new Date('2026-08-10T12:00:00Z');
+      const code = await generateAndStoreOtp(db, 'admin@bniwheeling.test', SECRET, now);
+      const input = {
+        email: 'admin@bniwheeling.test',
+        code,
+        secret: SECRET,
+        allowlist: ALLOWLIST,
+        sessionMaxAgeSeconds: SESSION_MAX_AGE,
+      };
+
+      const [a, b] = await Promise.all([
+        verifyOtpAndCreateSession(db, input, now),
+        verifyOtpAndCreateSession(db, input, now),
+      ]);
+
+      const successes = [a, b].filter((r) => r.ok);
+      expect(successes.length).toBeLessThanOrEqual(1);
+      // Both guesses were valid, correct, and unexpired — if the claim were
+      // not atomic, both would succeed. Exactly one should.
+      expect(successes.length).toBe(1);
+      expect(await rowFor(db, 'admin@bniwheeling.test')).toBeUndefined();
+
+      // Only one session row was actually created.
+      const allSessions = await db.select().from(sessions);
+      expect(allSessions.length).toBe(1);
+    });
+
+    it('exactly one winner under higher concurrency (5 simultaneous guesses at one code)', async () => {
+      const db = await createTestDb();
+      const now = new Date('2026-08-10T12:00:00Z');
+      const code = await generateAndStoreOtp(db, 'admin@bniwheeling.test', SECRET, now);
+      const input = {
+        email: 'admin@bniwheeling.test',
+        code,
+        secret: SECRET,
+        allowlist: ALLOWLIST,
+        sessionMaxAgeSeconds: SESSION_MAX_AGE,
+      };
+
+      const results = await Promise.all(
+        Array.from({ length: 5 }, () => verifyOtpAndCreateSession(db, input, now)),
+      );
+
+      expect(results.filter((r) => r.ok).length).toBe(1);
+      expect(await rowFor(db, 'admin@bniwheeling.test')).toBeUndefined();
+    });
+  });
 });
 
 describe('normalizeOtpEmail', () => {

@@ -12,7 +12,7 @@
 // never complete that flow. The email now also carries a 6-digit code the
 // admin can type directly into the installed app, which posts it here.
 import { randomInt, randomUUID, createHash, timingSafeEqual } from 'node:crypto';
-import { and, eq } from 'drizzle-orm';
+import { eq } from 'drizzle-orm';
 import { sessions, users, verificationTokens } from '@/db/schema';
 import { isAllowed } from '@/lib/allowlist';
 import { isUniqueViolation } from '@/lib/checkins';
@@ -132,10 +132,32 @@ export function sessionCookieOptions(useSecureCookies: boolean, expires: Date) {
 // sessionCookieName/sessionCookieOptions above.
 //
 // Attempt-limiting choice: rather than a per-code attempt counter (5
-// guesses), the row is deleted on ANY read — match or not. One guess per
-// emailed code makes brute force impossible without needing extra state,
-// at the minor UX cost that a typo burns the code and requires a fresh
-// email. See the task notes / commit message for this tradeoff.
+// guesses), the row is claimed (deleted) on the FIRST read — match or not.
+// One guess per emailed code makes brute force impossible without needing
+// extra state, at the minor UX cost that a typo burns the code and
+// requires a fresh email. See the task notes / commit message for this
+// tradeoff.
+//
+// SECURITY (fixed 2026-08-10, security review I-1): this "one guess" claim
+// must be a SINGLE atomic statement, not a SELECT followed by a separate
+// DELETE. The original implementation did exactly that — read the row,
+// THEN delete it, discarding the delete's rowcount — which meant two
+// concurrent verify calls (e.g. a spoofed X-Forwarded-For defeating the
+// per-IP rate limit, see lib/rate-limit.ts's getClientIp) could both read
+// the same still-present row before either delete landed, giving each an
+// independent guess against the live code: unlimited concurrent guessing,
+// bounded only by the rate limiter — not the "brute force impossible"
+// guarantee the comment above claims. Using `DELETE ... RETURNING` as the
+// read is what actually makes the claim atomic: Postgres serializes
+// concurrent DELETEs against the same row (the loser's statement
+// re-evaluates its WHERE clause against the now-committed-deleted row
+// under READ COMMITTED and matches nothing), so exactly one concurrent
+// caller ever gets a non-empty `row` back — see
+// tests/auth-otp.test.ts's "concurrent claim" tests, which fail against
+// the old SELECT-then-DELETE shape and pass against this one. The rate
+// limiter in app/admin/login/page.tsx's verifyCode is correctly
+// defense-in-depth on top of this atomic claim now, not the primary
+// protection against brute force.
 export async function verifyOtpAndCreateSession(
   db: Db,
   input: VerifyOtpInput,
@@ -154,14 +176,14 @@ export async function verifyOtpAndCreateSession(
   if (!isAllowed(email, input.allowlist)) return { ok: false, reason: 'not_allowed' };
 
   const identifier = otpIdentifier(email);
-  const [row] = await db.select().from(verificationTokens).where(eq(verificationTokens.identifier, identifier));
-  if (!row) return { ok: false, reason: 'unknown' };
 
-  // Single-use / single-guess (see attempt-limiting comment on the export
-  // above): consume the row now, before even checking whether it matches.
-  await db.delete(verificationTokens).where(
-    and(eq(verificationTokens.identifier, identifier), eq(verificationTokens.token, row.token)),
-  );
+  // Atomic claim: the DELETE *is* the read. See the security-review
+  // docblock above this function for why this must not be a separate
+  // SELECT followed by a DELETE.
+  const [row] = await db.delete(verificationTokens)
+    .where(eq(verificationTokens.identifier, identifier))
+    .returning();
+  if (!row) return { ok: false, reason: 'unknown' };
 
   if (row.expires.getTime() < now.getTime()) return { ok: false, reason: 'expired' };
 
