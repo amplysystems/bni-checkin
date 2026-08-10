@@ -11,17 +11,16 @@ import { Button } from '@/components/ui/button';
 // components/ui/button.tsx's docblock).
 const AMPLY_PILL_NAVY = '#0c1322';
 
-// Same four ad creatives as the kiosk (app/kiosk/kiosk-client.tsx's ADS) and
-// the same day-of-year selection logic (its dayOfYear()) — duplicated here
-// for the same "two call sites, not three" reason as AMPLY_PILL_NAVY above,
-// rather than shared via components/ui.
-const ADS = ['/ads/hero.png', '/ads/deserves.png', '/ads/building.png', '/ads/ask.png'] as const;
+// Same fixed dark background as the kiosk's split rail
+// (app/kiosk/kiosk-client.tsx's RAIL_NAVY) — this panel is the
+// "same-language" brand rail for the login screen, always dark regardless of
+// OS theme. Duplicated rather than shared for the same two-call-sites reason
+// as AMPLY_PILL_NAVY above.
+const RAIL_NAVY = '#0b0f19';
 
-function dayOfYear(date: Date): number {
-  const start = Date.UTC(date.getUTCFullYear(), 0, 0);
-  const diff = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - start;
-  return Math.floor(diff / 86_400_000);
-}
+// Same brand-red as the kiosk (app/kiosk/kiosk-client.tsx's BRAND_RED),
+// duplicated for the same reason as AMPLY_PILL_NAVY above.
+const BRAND_RED = '#CF2030';
 
 // Shown after every submit, regardless of whether the email was actually on
 // the allowlist or the send actually succeeded. Deliberately neutral: an
@@ -38,12 +37,21 @@ export default async function LoginPage({
   searchParams: Promise<{ sent?: string }>;
 }) {
   const { sent } = await searchParams;
-  const adSrc = ADS[dayOfYear(new Date()) % ADS.length];
 
   return (
     <main className="flex min-h-screen flex-col bg-neutral-100 dark:bg-neutral-950 font-sans md:flex-row">
       <div className="flex flex-1 flex-col items-center justify-center gap-6 px-6 py-12">
         <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-neutral-900 p-6">
+          {/* Present on every breakpoint (unlike the rail below, which is
+              md+ only) so the brand still shows up on a mobile admin login. */}
+          <Image
+            src="/bni-logo-transparent.png"
+            alt="BNI"
+            width={160}
+            height={90}
+            priority
+            className="mb-4 h-8 w-auto"
+          />
           <h1 className="mb-1 font-display text-xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
             BNI Wheeling admin
           </h1>
@@ -107,12 +115,34 @@ export default async function LoginPage({
         </footer>
       </div>
 
-      {/* Ad column — hidden below md (the split only makes sense once
-          there's room for both a usable form and a full-bleed image).
-          object-cover on a relative+fill Image, same pattern as the kiosk
-          splash backdrop. Decorative, so alt="". */}
-      <div className="relative hidden md:block md:w-2/5 lg:w-1/2">
-        <Image src={adSrc} alt="" fill sizes="(min-width: 768px) 40vw, 0px" className="object-cover" />
+      {/* Brand rail — replaces the old ad-image split panel (the source
+          creatives couldn't hold crisp full-bleed at this size, see
+          scripts/process-ads.ts). Same-language navy rail as the kiosk's
+          split-rail grid view (app/kiosk/kiosk-client.tsx's KioskRail):
+          fixed dark background regardless of OS theme, BNI mark, campaign
+          line, amply pill. Hidden below md, same as the panel it replaces —
+          the split only makes sense once there's room for both a usable
+          form and this rail. */}
+      <div
+        className="hidden md:flex md:w-2/5 md:flex-col md:justify-between md:px-10 md:py-10 lg:w-1/2"
+        style={{ backgroundColor: RAIL_NAVY }}
+      >
+        <Image src="/bni-logo-transparent.png" alt="BNI" width={160} height={90} className="h-12 w-auto" />
+
+        <p className="font-display text-4xl font-extrabold leading-tight tracking-tight text-neutral-50 lg:text-5xl">
+          One plumber.
+          <br />
+          One lawyer.
+          <br />
+          <span style={{ color: BRAND_RED }}>One of you.</span>
+        </p>
+
+        <span
+          className="inline-flex w-fit items-center rounded-full px-3 py-1.5"
+          style={{ backgroundColor: AMPLY_PILL_NAVY }}
+        >
+          <Image src="/amply-logo.png" alt="Amply Systems" width={45} height={16} className="h-4 w-auto" />
+        </span>
       </div>
     </main>
   );

@@ -75,8 +75,8 @@ const IDLE_MS = 45_000;
 const CROSSFADE_MS = 8_000;
 
 // The four ad creatives (see public/ads/) — shared by the attract loop
-// slideshow, the login split layout, and the splash backdrop.
-const ADS = ['/ads/hero.png', '/ads/deserves.png', '/ads/building.png', '/ads/ask.png'] as const;
+// slideshow and the splash backdrop.
+const ADS = ['/ads/hero.jpg', '/ads/deserves.jpg', '/ads/building.jpg', '/ads/ask.jpg'] as const;
 
 // Used to pick "the day's ad" for the splash backdrop — deterministic per
 // day (not per render), so it doesn't flicker between different check-ins
@@ -150,8 +150,10 @@ function formatClock(d: Date): string {
   }).format(d);
 }
 
-// Live venue clock for the header pill. Lazy initializer + interval-driven
-// updates keep setState out of the effect body (react-hooks/set-state-in-effect).
+// Live venue clock — feeds both the header pill (KioskTopBar, mobile/other
+// views) and the split rail's large clock (KioskRail, md+ grid view). Lazy
+// initializer + interval-driven updates keep setState out of the effect body
+// (react-hooks/set-state-in-effect).
 function useClock(): string {
   const [time, setTime] = useState(() => formatClock(new Date()));
   useEffect(() => {
@@ -209,6 +211,12 @@ function CheckMark({ className }: { className?: string }) {
 // way, unlike the rest of the page which flips with the OS theme.
 const AMPLY_PILL_NAVY = '#0c1322';
 
+// The md+ split-rail's fixed background (app/kiosk/kiosk-client.tsx's
+// KioskRail below) — always dark regardless of the OS theme, same rationale
+// as AMPLY_PILL_NAVY just above: it's a distinct surface from the page, not
+// something that should flip with dark:.
+const RAIL_NAVY = '#0b0f19';
+
 function AmplyFooter() {
   return (
     <footer className="mt-10 flex items-center justify-center gap-2 pb-4 text-sm text-neutral-400 dark:text-neutral-500">
@@ -226,6 +234,142 @@ function AmplyFooter() {
         Admin
       </a>
     </footer>
+  );
+}
+
+// Rail-bottom equivalent of AmplyFooter, for the md+ split rail (KioskRail
+// below). Same content (Powered-by pill + quiet Admin link), but the rail's
+// surface is a fixed dark navy regardless of OS theme — see SplashView's
+// docblock (app/kiosk/kiosk-client.tsx) for why fixed colors, not `dark:`
+// pairs, are correct on an always-dark surface. Not merged into AmplyFooter
+// itself since the two now have different layouts (row vs. stacked) and
+// color schemes (theme-reactive vs. fixed).
+function RailAmplyFooter() {
+  return (
+    <footer className="flex flex-col items-start gap-3">
+      <div className="flex items-center gap-2 text-sm text-neutral-400">
+        <span>Powered by</span>
+        <span
+          className="inline-flex items-center rounded-full px-3 py-1.5"
+          style={{ backgroundColor: AMPLY_PILL_NAVY }}
+        >
+          <Image src="/amply-logo.png" alt="Amply Systems" width={45} height={16} className="h-4 w-auto" />
+        </span>
+      </div>
+      <a
+        href="/admin"
+        className="min-h-[44px] inline-flex items-center text-xs text-neutral-500 underline-offset-2 hover:text-neutral-300 hover:underline"
+      >
+        Admin
+      </a>
+    </footer>
+  );
+}
+
+// The two rotating campaign lines for the rail's bottom (and, statically, the
+// login rail — app/admin/login/page.tsx). Alternates by day-of-year using the
+// same dayOfYear() selection already used for the daily ad (dailyAdSrc in
+// KioskClient below), so it changes once a day rather than per render.
+function CampaignLine({ index }: { index: number }) {
+  const className =
+    'font-display text-3xl font-extrabold leading-tight tracking-tight text-neutral-50';
+  if (index % 2 === 0) {
+    return (
+      <p className={className}>
+        One plumber.
+        <br />
+        One lawyer.
+        <br />
+        <span style={{ color: BRAND_RED }}>One of you.</span>
+      </p>
+    );
+  }
+  return (
+    <p className={className}>
+      The best opportunities
+      <br />
+      aren&apos;t online.
+      <br />
+      They&apos;re <span style={{ color: BRAND_RED }}>across the table.</span>
+    </p>
+  );
+}
+
+// Shared top bar: BNI mark + "Wheeling" wordmark, and (once the roster has
+// loaded) the date · live-clock pill. Used as-is for the splash / visitor
+// form / returning search views (unchanged from before the split-rail
+// redesign), and again — restricted to `md:hidden` — as the grid view's
+// mobile-only top bar, since the grid's md+ header content now lives in
+// KioskRail instead.
+function KioskTopBar({
+  roster, clock, className = '',
+}: {
+  roster: RosterResponse | null;
+  clock: string;
+  className?: string;
+}) {
+  return (
+    <header className={`flex items-center justify-between px-4 pt-5 sm:px-8 ${className}`}>
+      <div className="flex items-center gap-2.5">
+        <Image
+          src="/bni-logo-transparent.png"
+          alt="BNI"
+          width={160}
+          height={90}
+          priority
+          className="h-8 w-auto sm:h-9"
+        />
+        <span className="text-lg font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
+          Wheeling
+        </span>
+      </div>
+      {roster && (
+        <div className="rounded-full bg-white px-3.5 py-1.5 text-sm font-medium text-neutral-600 shadow-sm dark:bg-neutral-900 dark:text-neutral-300">
+          {formatMeetingDate(roster.meetingDate)} · {clock}
+        </div>
+      )}
+    </header>
+  );
+}
+
+// ---- Split rail (md+ grid view only) --------------------------------------
+//
+// The grid view's left rail: brand mark, a large live clock, a rotating
+// campaign line, and the amply/admin footer — fixed-width and always dark
+// (RAIL_NAVY), independent of the OS theme, same rationale as the amply pill.
+// `hidden md:flex`: below md the grid view falls back to the single-column
+// mobile layout (KioskTopBar + GridView's own AmplyFooter), so this never
+// renders there. Only ever mounted while view === 'grid' — splash and attract
+// render as their own exclusive views (see KioskClient's render switch), so
+// there's no risk of the rail showing through underneath them.
+function KioskRail({ roster, clock }: { roster: RosterResponse | null; clock: string }) {
+  const campaignIndex = useMemo(() => dayOfYear(new Date()) % 2, []);
+
+  return (
+    <aside
+      className="hidden md:flex md:min-h-screen md:w-[300px] md:flex-none md:flex-col md:px-8 md:py-8"
+      style={{ backgroundColor: RAIL_NAVY }}
+    >
+      <div className="flex items-center gap-2.5">
+        <Image src="/bni-logo-transparent.png" alt="BNI" width={160} height={90} priority className="h-10 w-auto" />
+        <span className="text-lg font-semibold tracking-tight text-neutral-50">Wheeling</span>
+      </div>
+
+      <div className="mt-14">
+        <p className="font-display text-6xl font-extrabold tracking-tight text-neutral-50">{clock}</p>
+        {roster && (
+          <p className="mt-2 text-sm text-neutral-400">{formatMeetingDate(roster.meetingDate)}</p>
+        )}
+      </div>
+
+      <div className="flex-1" />
+
+      <CampaignLine index={campaignIndex} />
+
+      <div className="mt-8">
+        <RailAmplyFooter />
+      </div>
+    </aside>
   );
 }
 
@@ -616,40 +760,35 @@ export default function KioskClient() {
 
   return (
     <div ref={rootRef} className="flex min-h-screen flex-1 flex-col bg-neutral-100 dark:bg-neutral-950">
-      {view !== 'attract' && (
-        <header className="flex items-center justify-between px-4 pt-5 sm:px-8">
-          <div className="flex items-center gap-2.5">
-            <Image
-              src="/bni-logo-transparent.png"
-              alt="BNI"
-              width={160}
-              height={90}
-              priority
-              className="h-8 w-auto sm:h-9"
-            />
-            <span className="text-lg font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
-              Wheeling
-            </span>
-          </div>
-          {roster && (
-            <div className="rounded-full bg-white px-3.5 py-1.5 text-sm font-medium text-neutral-600 shadow-sm dark:bg-neutral-900 dark:text-neutral-300">
-              {formatMeetingDate(roster.meetingDate)} · {clock}
-            </div>
-          )}
-        </header>
-      )}
+      {/* Splash / visitor form / returning search keep the original
+          single-column top bar unchanged (KioskTopBar with no className —
+          full width at every breakpoint). The grid view no longer uses this
+          copy: its own md+ header content lives in KioskRail, and its mobile
+          top bar is rendered inside the grid branch below, restricted to
+          `md:hidden`. Attract renders full-screen and gets no top bar. */}
+      {view !== 'attract' && view !== 'grid' && <KioskTopBar roster={roster} clock={clock} />}
 
       {view === 'grid' && (
-        <GridView
-          roster={roster}
-          rosterError={rosterError}
-          query={query}
-          setQuery={setQuery}
-          filteredMembers={filteredMembers}
-          pendingId={pendingId}
-          onTapMember={(m) => performCheckIn(m.id, m.displayName ?? m.fullName)}
-          onOpenVisitorForm={openVisitorForm}
-        />
+        <div className="flex flex-1 flex-col md:flex-row">
+          <KioskRail roster={roster} clock={clock} />
+          {/* md:pt-8: the mobile top bar right below (which supplies its own
+              top padding via KioskTopBar's pt-5) is hidden at this
+              breakpoint, so the panel needs its own top spacing to avoid
+              butting the greeting straight against the viewport edge. */}
+          <div className="flex flex-1 flex-col md:pt-8">
+            <KioskTopBar roster={roster} clock={clock} className="md:hidden" />
+            <GridView
+              roster={roster}
+              rosterError={rosterError}
+              query={query}
+              setQuery={setQuery}
+              filteredMembers={filteredMembers}
+              pendingId={pendingId}
+              onTapMember={(m) => performCheckIn(m.id, m.displayName ?? m.fullName)}
+              onOpenVisitorForm={openVisitorForm}
+            />
+          </div>
+        </div>
       )}
 
       {view === 'attract' && (
@@ -728,7 +867,7 @@ function GridView({
   return (
     <main className="flex-1 px-4 pb-12 sm:px-8">
       <div className="mx-auto max-w-5xl">
-        <h1 className="mt-6 font-display text-3xl font-bold tracking-tight text-neutral-900 sm:text-4xl dark:text-neutral-50">
+        <h1 className="mt-6 font-display text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
           {roster?.greeting ?? 'Welcome'}
         </h1>
         <p className="mt-1.5 text-neutral-500 dark:text-neutral-400">Tap your name to check in</p>
@@ -752,7 +891,7 @@ function GridView({
         )}
 
         {!rosterError && roster && (
-          <div className="mt-6 grid grid-cols-2 gap-3 sm:gap-4 md:grid-cols-3">
+          <div className="mt-6 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3">
             {filteredMembers.map((m) => (
               <MemberCard
                 key={m.id}
@@ -768,7 +907,12 @@ function GridView({
           First time here? Welcome →
         </Button>
 
-        <AmplyFooter />
+        {/* md+: this content already lives at the bottom of KioskRail
+            (RailAmplyFooter) — only render it here below md, where the rail
+            itself is hidden. */}
+        <div className="md:hidden">
+          <AmplyFooter />
+        </div>
       </div>
     </main>
   );

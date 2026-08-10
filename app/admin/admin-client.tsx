@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState, useRef, type ReactNode } from 'react';
+import Image from 'next/image';
 import { Button } from '@/components/ui/button';
 
 // ---- Types (mirrored from the admin API route contracts) ----------------
@@ -412,9 +413,12 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   return (
     <div className="flex min-h-screen flex-1 flex-col bg-neutral-100 dark:bg-neutral-950 font-sans">
       <header className="flex flex-wrap items-center justify-between gap-2 px-4 pt-5 sm:px-8">
-        <span className="font-display text-lg font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
-          Wheeling · Admin
-        </span>
+        <div className="flex items-center gap-2.5">
+          <Image src="/bni-logo-transparent.png" alt="BNI" width={160} height={90} priority className="h-7 w-auto" />
+          <span className="font-display text-lg font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
+            Wheeling · Admin
+          </span>
+        </div>
         <div className="flex items-center gap-3 text-sm text-neutral-500 dark:text-neutral-400">
           <span>{adminEmail}</span>
           {meetingDate && (
