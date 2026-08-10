@@ -972,6 +972,7 @@ export default function KioskClient() {
               pendingId={pendingId}
               onTapMember={(m) => performCheckIn(m.id, m.displayName ?? m.fullName)}
               onOpenVisitorForm={openVisitorForm}
+              onOpenReturning={openReturningSearch}
             />
           </div>
         </div>
@@ -1042,6 +1043,7 @@ export default function KioskClient() {
 function GridView({
   roster, rosterError, query, setQuery, filteredMembers, filteredLeadership, pendingId, onTapMember,
   onOpenVisitorForm,
+  onOpenReturning,
 }: {
   roster: RosterResponse | null;
   rosterError: boolean;
@@ -1052,6 +1054,7 @@ function GridView({
   pendingId: string | null;
   onTapMember: (m: Member) => void;
   onOpenVisitorForm: () => void;
+  onOpenReturning: () => void;
 }) {
   return (
     <main className="flex-1 px-4 pb-12 sm:px-8">
@@ -1134,6 +1137,13 @@ function GridView({
             orphaning a lone glyph. */}
         <Button variant="primary" size="lg" fullWidth onClick={onOpenVisitorForm} className="mt-10">
           First time here? Welcome{' '}→
+        </Button>
+
+        {/* Returning visitors get a visible top-level path — the in-form
+            "find your name" link existed but even the product owner didn't
+            discover it, so it earns a real button on the main screen. */}
+        <Button variant="secondary" size="touch" fullWidth onClick={onOpenReturning} className="mt-3">
+          Visited before? Welcome back
         </Button>
 
         {/* md+: this content already lives at the bottom of KioskRail
