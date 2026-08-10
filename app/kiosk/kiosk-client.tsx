@@ -299,13 +299,17 @@ function CampaignLine({ index }: { index: number }) {
       </p>
     );
   }
+  // Rail-fit cut of the campaign line: the full tagline's closing phrase
+  // ("They're across the table.") can't fit the 300px rail at a legible
+  // size, so the rail runs the three-word form with deliberate breaks —
+  // the full line lives on in the ad creatives themselves.
   return (
     <p className={className}>
-      The best opportunities
+      The best
       <br />
-      aren&apos;t online.
+      opportunities
       <br />
-      They&apos;re <span style={{ color: BRAND_RED }}>across the table.</span>
+      <span style={{ color: BRAND_RED }}>aren&apos;t online.</span>
     </p>
   );
 }
