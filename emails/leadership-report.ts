@@ -40,6 +40,11 @@ export type LeadershipReportData = {
   membershipGoal: number; // 25
   weeklyCounts: WeeklyCount[]; // up to the last 6 meetings, chronological oldest -> newest
   visitorSources: VisitorSource[];
+  // Phase 2 Task 8 (P2-6 carry-in): pre-formatted note lines — see
+  // lib/emails/compile.ts's findPossibleRepeatVisitors — flagging a
+  // present visitor whose email matches a DIFFERENT person record with 2+
+  // prior visits. Empty in the common case (no note shown at all).
+  possibleRepeatVisitors: string[];
   siteUrl: string;
 };
 
@@ -100,6 +105,14 @@ export function leadershipReportHtml(data: LeadershipReportData): string {
     ? `<p style="margin:12px 0 0;font-size:12px;color:#8a8a92;">No email on file (not sent a thank-you): ${data.skippedVisitorEmails.map(escapeHtml).join(', ')}</p>`
     : '';
 
+  const repeatVisitorHtml = data.possibleRepeatVisitors.length > 0
+    ? `
+        <div style="margin:24px 0 0;padding:12px 14px;background:#fff8ea;border-radius:8px;border:1px solid #f3e3b8;">
+          <p style="margin:0 0 4px;font-size:13px;font-weight:700;color:#7a5c10;">Possible repeat visitor${data.possibleRepeatVisitors.length > 1 ? 's' : ''}</p>
+          ${data.possibleRepeatVisitors.map((n) => `<p style="margin:0;font-size:12px;color:#7a5c10;">${escapeHtml(n)}</p>`).join('')}
+        </div>`
+    : '';
+
   return `<!DOCTYPE html>
 <html>
 <body style="margin:0;padding:0;background:#f2f2f5;">
@@ -127,6 +140,7 @@ export function leadershipReportHtml(data: LeadershipReportData): string {
         <p style="margin:24px 0 6px;font-size:14px;font-weight:700;color:#101014;">Visitors (${data.visitors.length})</p>
         ${visitorsHtml}
         ${skippedHtml}
+        ${repeatVisitorHtml}
 
         <p style="margin:24px 0 6px;font-size:14px;font-weight:700;color:#101014;">Visitor sources</p>
         <p style="margin:0;font-size:14px;color:#3c3c43;">${data.visitorSources.map((s) => `${escapeHtml(s.source)} (${s.count})`).join(' &middot; ') || 'No visitors this week.'}</p>
@@ -163,6 +177,10 @@ export function leadershipReportText(data: LeadershipReportData): string {
       : ['  (none this week)']),
     ...(data.skippedVisitorEmails.length > 0
       ? [`  No email on file (not sent a thank-you): ${data.skippedVisitorEmails.join(', ')}`]
+      : []),
+    ...(data.possibleRepeatVisitors.length > 0
+      ? ['', `Possible repeat visitor${data.possibleRepeatVisitors.length > 1 ? 's' : ''}:`,
+          ...data.possibleRepeatVisitors.map((n) => `  - ${n}`)]
       : []),
     '',
     `Visitor sources: ${visitorSourcesLine(data.visitorSources)}`,

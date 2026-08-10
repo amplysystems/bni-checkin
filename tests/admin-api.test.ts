@@ -6,7 +6,7 @@ import { auth } from '@/auth';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seed } from '../scripts/seed';
 import { setDb } from '@/lib/db';
-import { people, memberships, personRoles, rateLimits } from '@/db/schema';
+import { people, memberships, personRoles, rateLimits, meetings } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { checkIn, kioskRoster, voidCheckIn } from '@/lib/checkins';
 import { chicagoDateString } from '@/lib/time';
@@ -399,7 +399,7 @@ describe('admin API', () => {
   describe('meetings GET (option B "Meeting list")', () => {
     it('rejects unauthenticated requests with 401', async () => {
       asAnon();
-      expect((await meetingsGET()).status).toBe(401);
+      expect((await meetingsGET(new Request('http://admin.test/api/admin/meetings'))).status).toBe(401);
     });
 
     it('returns reverse-chron meetings with correct counts, excludes voided attendance, and reports visitor visit numbers', async () => {
@@ -434,7 +434,7 @@ describe('admin API', () => {
       await checkIn(db, { personId: mike.id, clientOpId: 'op-mike-1', source: 'test', now: laterDate });
       await checkIn(db, { personId: visitor.id, clientOpId: 'op-visitor-2', source: 'test', now: laterDate });
 
-      const res = await meetingsGET();
+      const res = await meetingsGET(new Request('http://admin.test/api/admin/meetings'));
       expect(res.status).toBe(200);
       const body = await res.json();
 
@@ -467,6 +467,67 @@ describe('admin API', () => {
       expect(laterMeeting.attendees.find((a: Attendee) => a.fullName === 'Mike Anderson')).toBeTruthy();
       const visitorAtLater = laterMeeting.attendees.find((a: Attendee) => a.fullName === 'Val Visitor');
       expect(visitorAtLater.visitNumber).toBe(2);
+    });
+
+    // Task 8: "Show earlier" pagination — offset param, 26/page.
+    describe('pagination (offset, 26/page)', () => {
+      async function seedMeetings(count: number) {
+        const rows: Array<{ meetingDate: string }> = [];
+        for (let i = 0; i < count; i += 1) {
+          // 2026-01-07 + 7*i days, well clear of any DST boundary math —
+          // distinct weekly dates, oldest first as inserted.
+          const d = new Date(Date.UTC(2026, 0, 7 + 7 * i, 20, 30, 0));
+          const dateStr = d.toISOString().slice(0, 10);
+          rows.push({ meetingDate: dateStr });
+        }
+        await db.insert(meetings).values(rows.map((r) => ({ meetingDate: r.meetingDate, startsAt: new Date(`${r.meetingDate}T20:30:00Z`) })));
+      }
+
+      it('defaults to the first 26, most-recent-first, with hasMore true when there are more', async () => {
+        asAdmin();
+        await seedMeetings(30);
+        const res = await meetingsGET(new Request('http://admin.test/api/admin/meetings'));
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.meetings).toHaveLength(26);
+        expect(body.hasMore).toBe(true);
+        // Reverse-chron: first row is the LATEST seeded date (i=29 -> Jan 7 + 7*29 days).
+        expect(body.meetings[0].meetingDate).toBe('2026-07-29');
+      });
+
+      it('offset=26 returns the next page (the earlier ones) and hasMore reflects what remains', async () => {
+        asAdmin();
+        await seedMeetings(30);
+        const res = await meetingsGET(new Request('http://admin.test/api/admin/meetings?offset=26'));
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.meetings).toHaveLength(4); // 30 total - 26 already shown
+        expect(body.hasMore).toBe(false);
+
+        const firstPage = await (await meetingsGET(new Request('http://admin.test/api/admin/meetings'))).json();
+        const firstPageIds = new Set(firstPage.meetings.map((m: { id: string }) => m.id));
+        for (const m of body.meetings) expect(firstPageIds.has(m.id)).toBe(false); // no overlap between pages
+      });
+
+      it('an offset past the end returns an empty page with hasMore false', async () => {
+        asAdmin();
+        await seedMeetings(5);
+        const res = await meetingsGET(new Request('http://admin.test/api/admin/meetings?offset=100'));
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.meetings).toEqual([]);
+        expect(body.hasMore).toBe(false);
+      });
+
+      it('an absent/non-numeric offset param defaults to 0, not an error', async () => {
+        asAdmin();
+        await seedMeetings(3);
+        const res = await meetingsGET(new Request('http://admin.test/api/admin/meetings?offset=not-a-number'));
+        expect(res.status).toBe(200);
+        const body = await res.json();
+        expect(body.meetings).toHaveLength(3);
+        expect(body.hasMore).toBe(false);
+      });
     });
   });
 

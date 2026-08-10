@@ -49,7 +49,12 @@ const SIZE_CLASS: Record<ButtonSize, string> = {
   // still a full touchscreen target, but not the page's primary CTA.
   touch: 'rounded-2xl px-6 min-h-[56px] text-base',
   // Admin dialog / roster panel / login — compact, mouse-oriented controls.
-  md: 'rounded-xl px-5 py-2.5 text-[15px]',
+  // min-h-[48px] (Phase 2 Task 8 admin clarity pass): several admin buttons
+  // measured under the 48px touch-target floor with padding alone (py-2.5 +
+  // text-[15px] lands around 44-46px) — a floor set here, in the shared
+  // component, rather than per call site, so it can never drift for a
+  // future admin button that forgets to think about it.
+  md: 'rounded-xl px-5 py-2.5 text-[15px] min-h-[48px]',
 };
 
 // Font weight is split out of SIZE_CLASS (rather than folded into it, the

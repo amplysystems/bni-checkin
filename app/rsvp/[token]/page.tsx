@@ -86,12 +86,21 @@ function MeetingDetails({ meetingDateLabel }: { meetingDateLabel: string }) {
   );
 }
 
+// P2-6 carry-in: a link opened after its named Wednesday has already come
+// and gone (resolution.passed — see lib/rsvp-visit.ts) gets its own,
+// honest headline rather than confirming a meeting that already happened.
+// meetingDateLabel/targetDateStr are already recomputed to the next real
+// meeting from now by the time this renders, so MeetingDetails and
+// CalendarActions below need no separate "passed" branch of their own —
+// they're just describing whatever date resolution actually hands them.
 function ValidView({ resolution }: { resolution: ValidResolution }) {
   const headline = resolution.purpose === 'rsvp'
-    ? `You're on the list for Wednesday, ${resolution.firstName}`
+    ? (resolution.passed
+      ? `That Wednesday has passed — here's the next one, ${resolution.firstName}`
+      : `You're on the list for Wednesday, ${resolution.firstName}`)
     : `Got it, ${resolution.firstName} — Jason will reach out`;
   const subtext = resolution.purpose === 'rsvp'
-    ? "We'll have a seat waiting for you."
+    ? (resolution.passed ? "We've saved you a seat for the next one instead." : "We'll have a seat waiting for you.")
     : "He'll follow up personally — no forms to fill out.";
 
   return (

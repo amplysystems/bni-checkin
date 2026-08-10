@@ -40,7 +40,7 @@ type SettingsRow = typeof settingsTable.$inferSelect;
 // see migration 0003 for the incident where these two drifted apart.
 const SETTINGS_DEFAULTS: SettingsRow = {
   id: 1, approveMode: true, reportSendTime: '17:30', thankyouSendTime: '17:00',
-  reportRecipients: [], openSeats: [],
+  reportRecipients: [], openSeats: [], rsvpNotifyCarey: false, careyEmail: null,
 };
 
 // Falls back to schema defaults if the singleton row hasn't been seeded
@@ -355,10 +355,22 @@ export async function ensureRsvpNotice(
   db: Db,
   { token, purpose, personFullName }: { token: string; purpose: RsvpNoticePurpose; personFullName: string },
 ): Promise<EmailMessage | null> {
+  // P2-6 carry-in: Carey opts in via the email-center settings toggle, but
+  // only actually gets added once an address is on file for her — a toggle
+  // with no address would otherwise silently notify nobody extra (see
+  // db/schema.ts's rsvpNotifyCarey/careyEmail comment for why both columns
+  // exist). SAFE_MODE still collapses this whole list down to OWNER_EMAIL
+  // at send time regardless (lib/emails/send.ts's applySafeMode) — this
+  // recipients list is what SAFE_MODE redirects FROM, not a bypass of it.
+  const settingsRow = await getSettings(db);
+  const recipients = settingsRow.rsvpNotifyCarey && settingsRow.careyEmail
+    ? [OWNER_EMAIL, settingsRow.careyEmail]
+    : [OWNER_EMAIL];
+
   const [inserted] = await db.insert(emailMessages).values({
     sendKey: rsvpNoticeSendKey(token),
     type: 'rsvp_notice',
-    recipients: [OWNER_EMAIL],
+    recipients,
     subject: rsvpNoticeSubject(purpose, personFullName),
     bodySnapshot: rsvpNoticeHtml({ purpose, personFullName, siteUrl: siteUrl() }),
     state: 'draft',

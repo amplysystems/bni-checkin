@@ -14,6 +14,8 @@ import type { Db } from '@/lib/db';
 import { findRsvpToken, markRsvpTokenUsed, type RsvpPurpose } from '@/lib/emails/rsvp-tokens';
 import { ensureRsvpNotice } from '@/lib/emails/engine';
 import { firstNameOf, formatMeetingDateLabel } from '@/lib/emails/compile';
+import { chicagoDateString } from '@/lib/time';
+import { nextWednesday } from '@/lib/emails/ics';
 
 export type RsvpVisitResolution =
   | { status: 'invalid' }
@@ -23,6 +25,9 @@ export type RsvpVisitResolution =
       firstName: string;
       meetingDateLabel: string;
       targetDateStr: string;
+      // P2-6 carry-in: true when the token's originally-compiled targetDate
+      // has already gone by (the link was opened late) — see below.
+      passed: boolean;
     };
 
 // `now` is injectable for tests; every real caller (the page component)
@@ -43,11 +48,22 @@ export async function resolveRsvpVisit(db: Db, tokenParam: string, now: Date = n
     await ensureRsvpNotice(db, { token: row.token, purpose: row.purpose, personFullName: row.personFullName });
   }
 
+  // P2-6 carry-in: the token's targetDate is fixed at compile time (this
+  // meeting's date + 7 — db/schema.ts's own comment) and never updated
+  // afterward. A link opened late enough that the meeting it names has
+  // already happened would otherwise confirm a stale, already-past date —
+  // once that's true, point everything (the headline AND all three
+  // calendar actions) at the literal next meeting from right now instead.
+  const todayStr = chicagoDateString(now);
+  const passed = row.targetDate < todayStr;
+  const targetDateStr = passed ? nextWednesday(now) : row.targetDate;
+
   return {
     status: 'valid',
     purpose: row.purpose,
     firstName: firstNameOf(row.personFullName),
-    meetingDateLabel: formatMeetingDateLabel(row.targetDate),
-    targetDateStr: row.targetDate,
+    meetingDateLabel: formatMeetingDateLabel(targetDateStr),
+    targetDateStr,
+    passed,
   };
 }

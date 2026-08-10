@@ -14,7 +14,7 @@
 // for the exact reason getOrCreateRsvpToken is idempotent per
 // person+purpose+targetDate.
 
-import { and, desc, eq, inArray, isNull, lte } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lte, ne } from 'drizzle-orm';
 import { attendance, meetings, memberships, people, settings as settingsTable } from '@/db/schema';
 import type { Db } from '@/lib/db';
 import { OWNER_EMAIL, siteUrl } from './constants';
@@ -98,8 +98,13 @@ export function formatMeetingDateLabel(dateStr: string): string {
 // (inclusive of this one — "last 6 weeks" reads naturally as ending with
 // today), returned oldest -> newest.
 async function compileWeeklyCounts(db: Db, uptoDateStr: string): Promise<WeeklyCount[]> {
+  // P2-3 review minor #5 (spec §4): a canceled meeting never happened —
+  // showing it in the "last 6 weeks" trend line would silently read as a
+  // real 0-attendance week, understating what's actually a normal
+  // attendance history with one week simply skipped. Excluded outright
+  // rather than shown as a 0, so the remaining bars stay comparable weeks.
   const recentMeetings = await db.select().from(meetings)
-    .where(lte(meetings.meetingDate, uptoDateStr))
+    .where(and(lte(meetings.meetingDate, uptoDateStr), ne(meetings.status, 'canceled')))
     .orderBy(desc(meetings.meetingDate))
     .limit(WEEKLY_HISTORY_COUNT);
   if (recentMeetings.length === 0) return [];
@@ -112,6 +117,60 @@ async function compileWeeklyCounts(db: Db, uptoDateStr: string): Promise<WeeklyC
 
   return recentMeetings.slice().reverse()
     .map((m) => ({ meetingDate: m.meetingDate, count: counts.get(m.id) ?? 0 }));
+}
+
+// P2-6 carry-in: a visitor present at THIS meeting whose email matches a
+// DIFFERENT person row that already has 2+ recorded (non-voided) visitor
+// visits is almost certainly the same human who filled out the kiosk form
+// again — a fresh name typed at the tablet instead of using "Welcome back"
+// — rather than two unrelated people who happen to share an inbox. Left
+// undetected, that reads to leadership as brand-new interest every single
+// time, and the two roster rows never get merged. This is a NOTE, not a
+// block: it never changes what gets compiled or sent, only what the report
+// says.
+async function findPossibleRepeatVisitors(
+  db: Db,
+  visitorRows: Array<{ personId: string; email: string | null; fullName: string; displayName: string | null }>,
+): Promise<string[]> {
+  const emails = Array.from(new Set(visitorRows.map((v) => v.email).filter((e): e is string => Boolean(e))));
+  if (emails.length === 0) return [];
+
+  const emailMatches = await db.select({
+    id: people.id, email: people.email, fullName: people.fullName, displayName: people.displayName,
+  }).from(people).where(inArray(people.email, emails));
+
+  const candidateIds = emailMatches.map((m) => m.id);
+  const candidateVisitRows = candidateIds.length > 0
+    ? await db.select({ personId: attendance.personId }).from(attendance).where(and(
+        inArray(attendance.personId, candidateIds),
+        eq(attendance.kind, 'visitor'),
+        isNull(attendance.voidedAt),
+      ))
+    : [];
+  const visitCountById = new Map<string, number>();
+  for (const r of candidateVisitRows) visitCountById.set(r.personId, (visitCountById.get(r.personId) ?? 0) + 1);
+
+  const candidatesByEmail = new Map<string, Array<{ id: string; name: string }>>();
+  for (const m of emailMatches) {
+    if (!m.email) continue;
+    const list = candidatesByEmail.get(m.email) ?? [];
+    list.push({ id: m.id, name: displayName(m) });
+    candidatesByEmail.set(m.email, list);
+  }
+
+  const notes: string[] = [];
+  for (const v of visitorRows) {
+    if (!v.email) continue;
+    const match = (candidatesByEmail.get(v.email) ?? [])
+      .find((other) => other.id !== v.personId && (visitCountById.get(other.id) ?? 0) >= 2);
+    if (match) {
+      const priorVisits = visitCountById.get(match.id) ?? 0;
+      notes.push(
+        `${displayName(v)} (${v.email}) may be the same person as ${match.name}, who has ${priorVisits} prior visits.`,
+      );
+    }
+  }
+  return notes;
 }
 
 export async function compileForMeeting(db: Db, meetingId: string): Promise<CompiledMeeting> {
@@ -242,6 +301,8 @@ export async function compileForMeeting(db: Db, meetingId: string): Promise<Comp
   const visitorSources: VisitorSource[] = Array.from(sourceCounts, ([source, count]) => ({ source, count }))
     .sort((a, b) => b.count - a.count || a.source.localeCompare(b.source));
 
+  const possibleRepeatVisitors = await findPossibleRepeatVisitors(db, visitorRows);
+
   const reportData: LeadershipReportData = {
     meetingDateLabel,
     attendanceCount: rows.length,
@@ -254,6 +315,7 @@ export async function compileForMeeting(db: Db, meetingId: string): Promise<Comp
     membershipGoal: MEMBERSHIP_GOAL,
     weeklyCounts,
     visitorSources,
+    possibleRepeatVisitors,
     siteUrl: url,
   };
 

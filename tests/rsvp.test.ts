@@ -160,4 +160,40 @@ describe('lib/rsvp-visit resolveRsvpVisit', () => {
     const [notice] = await db.select().from(emailMessages).where(eq(emailMessages.sendKey, rsvpNoticeSendKey(token)));
     expect(notice.subject).toBe('Val Visitor is interested in membership');
   });
+
+  // P2-6 carry-in (Task 8): a link opened after its named Wednesday has
+  // already come and gone.
+  describe('targetDate < today ("passed")', () => {
+    it('recomputes meetingDateLabel/targetDateStr to the next real meeting and sets passed:true', async () => {
+      vi.stubGlobal('fetch', mockFetchOk('notice-passed-1'));
+      // Token names a meeting date well in the past relative to `now` below.
+      const token = await getOrCreateRsvpToken(db, { personId, purpose: 'rsvp', targetDate: '2026-08-05' });
+      const now = new Date('2026-08-12T19:00:00Z'); // Wednesday 2026-08-12, 14:00 CT
+
+      const resolution = await resolveRsvpVisit(db, token, now);
+      expect(resolution).toMatchObject({ status: 'valid', purpose: 'rsvp', passed: true });
+      if (resolution.status !== 'valid') throw new Error('expected valid');
+      // Next Wednesday from `now` (itself a Wednesday, before meeting start) is TODAY.
+      expect(resolution.targetDateStr).toBe('2026-08-12');
+      expect(resolution.meetingDateLabel).toContain('August 12, 2026');
+    });
+
+    it('does not mark a still-upcoming targetDate as passed', async () => {
+      vi.stubGlobal('fetch', mockFetchOk('notice-passed-2'));
+      const token = await getOrCreateRsvpToken(db, { personId, purpose: 'rsvp', targetDate: '2026-08-19' });
+      const now = new Date('2026-08-12T19:00:00Z');
+
+      const resolution = await resolveRsvpVisit(db, token, now);
+      expect(resolution).toMatchObject({ status: 'valid', passed: false, targetDateStr: '2026-08-19' });
+    });
+
+    it('an interest token past its targetDate also gets passed:true (the meeting-details card still needs a real date)', async () => {
+      vi.stubGlobal('fetch', mockFetchOk('notice-passed-3'));
+      const token = await getOrCreateRsvpToken(db, { personId, purpose: 'interest', targetDate: '2026-08-05' });
+      const now = new Date('2026-08-12T19:00:00Z');
+
+      const resolution = await resolveRsvpVisit(db, token, now);
+      expect(resolution).toMatchObject({ status: 'valid', purpose: 'interest', passed: true, targetDateStr: '2026-08-12' });
+    });
+  });
 });

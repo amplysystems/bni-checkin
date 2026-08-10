@@ -19,6 +19,7 @@ function baseReportData(overrides: Partial<LeadershipReportData> = {}): Leadersh
     membershipGoal: 25,
     weeklyCounts: [],
     visitorSources: [],
+    possibleRepeatVisitors: [],
     siteUrl: 'https://example.test',
     ...overrides,
   };
@@ -89,6 +90,26 @@ describe('template HTML escaping at the person-data boundary', () => {
 
     const text = leadershipReportText(data);
     expect(text).toContain(XSS_NAME);
+  });
+
+  it('leadershipReportHtml escapes possible-repeat-visitor notes; text is untouched', () => {
+    const note = `${XSS_NAME} (bad@example.com) may be the same person as ${XSS_NAME}, who has 3 prior visits.`;
+    const data = baseReportData({ possibleRepeatVisitors: [note] });
+    const html = leadershipReportHtml(data);
+    expect(html).not.toContain(XSS_NAME);
+    expect((html.match(/<img /g) ?? []).length).toBe(1); // still just the BNI logo
+    expect(html).toContain('Possible repeat visitor');
+
+    const text = leadershipReportText(data);
+    expect(text).toContain(XSS_NAME);
+    expect(text).toContain('Possible repeat visitor');
+  });
+
+  it('leadershipReportHtml omits the possible-repeat-visitor callout entirely when there is nothing to flag', () => {
+    const html = leadershipReportHtml(baseReportData());
+    expect(html).not.toContain('Possible repeat visitor');
+    const text = leadershipReportText(baseReportData());
+    expect(text).not.toContain('Possible repeat visitor');
   });
 
   it('subject lines are plain text and are never HTML-escaped', () => {

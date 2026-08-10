@@ -34,11 +34,19 @@ const SendTime = z.string()
     return mins >= MIN_MINUTES && mins <= MAX_MINUTES;
   }, { message: CLAMP_MESSAGE });
 
+const CAREY_EMAIL_REQUIRED_MESSAGE = "Add Carey's email before turning this on.";
+
 const Body = z.object({
   approveMode: z.boolean().optional(),
   reportSendTime: SendTime.optional(),
   thankyouSendTime: SendTime.optional(),
   reportRecipients: z.array(z.string().trim().email().max(320)).max(MAX_RECIPIENTS).optional(),
+  // P2-6 carry-in. careyEmail is nullable (clearing it back out is valid —
+  // an admin who no longer wants Carey notified) as well as optional
+  // (untouched, in which case the merge below falls back to whatever's
+  // already stored).
+  rsvpNotifyCarey: z.boolean().optional(),
+  careyEmail: z.string().trim().email().max(320).nullable().optional(),
 }).refine((b) => Object.keys(b).length > 0, { message: 'No changes to save' });
 
 export async function GET() {
@@ -58,6 +66,19 @@ export async function POST(req: Request) {
   }
   const db = getDb();
   const fields = parsed.data;
+
+  // P2-6 carry-in: the toggle can only ever end up ON with an address on
+  // file — checked against the RESULTANT state (this request's fields
+  // merged over whatever's already stored), not just this request's own
+  // fields in isolation, since "turn the toggle on" and "set the address"
+  // are two independent saves from the settings card's own two controls
+  // (see app/admin/admin-client.tsx) and each must be safe on its own.
+  const current = await getSettings(db);
+  const resultantCarey = fields.rsvpNotifyCarey ?? current.rsvpNotifyCarey;
+  const resultantCareyEmail = 'careyEmail' in fields ? fields.careyEmail ?? null : current.careyEmail;
+  if (resultantCarey && !resultantCareyEmail) {
+    return Response.json({ error: CAREY_EMAIL_REQUIRED_MESSAGE }, { status: 400 });
+  }
 
   // Upsert (mirrors getOrCreateMeetingFor's own onConflictDoUpdate pattern)
   // rather than a bare UPDATE: the singleton settings row is always seeded

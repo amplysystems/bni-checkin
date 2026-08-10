@@ -113,19 +113,24 @@ const EVENT_TYPE_TO_DELIVERY_STATUS: Record<string, DeliveryStatus> = {
 // Forward-only progression (spec §7 / plan Task 7): an incoming status only
 // lands if it outranks whatever's already stored (a NULL current status
 // always loses, so the very first event always wins). 'sent' is the
-// earliest signal; 'delayed' is a transient in-between; 'delivered' and the
-// three terminal negative outcomes share the top rank — once any one of
-// them lands, none of the others (nor a stale re-delivery of an earlier
-// rank, e.g. a duplicated 'sent' arriving after 'delivered') can overwrite
-// it. This is what makes "delivered never regresses to sent" true even
-// under Resend's documented at-least-once, out-of-order delivery.
+// earliest signal; 'delayed' is a transient in-between; 'delivered' is the
+// positive terminal outcome. P2-7 carry-in: the three NEGATIVE terminal
+// outcomes (bounced/complained/failed) now outrank 'delivered' — Resend can
+// legitimately deliver an event sequence like sent -> delivered -> bounced
+// (a mailbox accepts a message, then later rejects/reports it), and a
+// DELAYED bounce arriving after "delivered" already landed is exactly the
+// case admins most need surfaced (app/admin/admin-client.tsx's "Email
+// bounced" roster badge and delivery-status chip), not silently swallowed
+// by the old shared-top-rank rule. A duplicated/out-of-order 'delivered'
+// arriving AFTER a bounce, conversely, still can't regress it back —
+// bounced/complained/failed are the new top rank, full stop.
 const DELIVERY_STATUS_RANK: Record<DeliveryStatus, number> = {
   sent: 1,
   delayed: 2,
   delivered: 3,
-  bounced: 3,
-  complained: 3,
-  failed: 3,
+  bounced: 4,
+  complained: 4,
+  failed: 4,
 };
 
 // The CASE expression reads the CURRENT stored value; the new value's rank
@@ -138,9 +143,9 @@ const CURRENT_RANK_SQL = sql`CASE ${emailMessages.deliveryStatus}
   WHEN 'sent' THEN 1
   WHEN 'delayed' THEN 2
   WHEN 'delivered' THEN 3
-  WHEN 'bounced' THEN 3
-  WHEN 'complained' THEN 3
-  WHEN 'failed' THEN 3
+  WHEN 'bounced' THEN 4
+  WHEN 'complained' THEN 4
+  WHEN 'failed' THEN 4
   ELSE 0
 END`;
 
@@ -166,11 +171,27 @@ export type WebhookOutcome = {
 };
 
 // The whole verified-and-parsed pipeline: idempotent insert into
-// email_events on providerEventId (svix-id) via onConflictDoNothing, then —
-// only for a genuinely new event, never a replay — the forward-only
-// delivery_status update on the matching email_messages row (matched by
-// providerMessageId = data.email_id). An unmatched email_id still records
-// the event (audit trail intact) and simply updates nothing else.
+// email_events on providerEventId (svix-id) via onConflictDoNothing, then
+// — regardless of whether that insert was a genuinely new event or a
+// replay — the forward-only delivery_status update on the matching
+// email_messages row (matched by providerMessageId = data.email_id). An
+// unmatched email_id still records the event (audit trail intact) and
+// simply updates nothing else.
+//
+// P2-7 carry-in: earlier versions of this function early-returned on a
+// duplicate svix-id WITHOUT re-running the status update, reasoning
+// "whatever the first delivery did stands." That leaves a crash window: if
+// the process died AFTER the email_events insert committed but BEFORE the
+// status update ran, the row is stuck half-applied forever — Resend's
+// at-least-once redelivery of that SAME event would hit the duplicate path
+// and, under the old logic, never get another chance to apply it. Re-
+// running applyDeliveryStatusForwardOnly unconditionally heals that window
+// at zero replay risk: it's a single guarded UPDATE whose own rank check
+// makes re-applying an already-applied status a true no-op, and it can
+// never regress an already-higher-ranked status (a duplicate 'sent'
+// replayed after 'delivered' already landed still can't undo it). Single-
+// statement discipline preserved — still exactly one UPDATE, no read-then-
+// write added.
 export async function recordResendWebhookEvent(
   db: Db,
   { eventId, body, now = new Date() }: { eventId: string; body: z.infer<typeof WebhookBody>; now?: Date },
@@ -195,13 +216,7 @@ export async function recordResendWebhookEvent(
     payload: body,
   }).onConflictDoNothing({ target: emailEvents.providerEventId }).returning({ id: emailEvents.id });
 
-  if (!inserted) {
-    // Already recorded by an earlier delivery of the SAME event — Resend's
-    // at-least-once guarantee means this is expected, not an error. Never
-    // re-apply the status update either: whatever the first delivery did
-    // (or the forward-only guard refused to do) stands.
-    return { duplicate: true, messageMatched: matchedMessageId !== null, messageUpdated: false };
-  }
+  const duplicate = !inserted;
 
   const deliveryStatus = EVENT_TYPE_TO_DELIVERY_STATUS[body.type];
   let messageUpdated = false;
@@ -209,7 +224,7 @@ export async function recordResendWebhookEvent(
     messageUpdated = await applyDeliveryStatusForwardOnly(db, emailId, deliveryStatus);
   }
 
-  return { duplicate: false, messageMatched: matchedMessageId !== null, messageUpdated };
+  return { duplicate, messageMatched: matchedMessageId !== null, messageUpdated };
 }
 
 // The full route handler, split out from app/api/webhooks/resend/route.ts

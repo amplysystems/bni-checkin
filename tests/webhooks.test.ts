@@ -165,6 +165,94 @@ describe('POST /api/webhooks/resend', () => {
     expect(events).toHaveLength(1);
   });
 
+  it('P2-7 carry-in: a "bounced" event arriving after "delivered" flips the status (bounced now outranks delivered)', async () => {
+    await db.insert(emailMessages).values({
+      sendKey: 'webhook-test:delivered-then-bounced', type: 'visitor_thankyou', meetingId: null,
+      recipients: ['x@example.com'], subject: 'x', state: 'sent', providerMessageId: 'resend-msg-dtb',
+    });
+
+    const deliveredRes = await webhookPOST(req({
+      body: { type: 'email.delivered', data: { email_id: 'resend-msg-dtb' } },
+    }));
+    expect(deliveredRes.status).toBe(200);
+    const [afterDelivered] = await db.select().from(emailMessages)
+      .where(eq(emailMessages.providerMessageId, 'resend-msg-dtb'));
+    expect(afterDelivered.deliveryStatus).toBe('delivered');
+
+    const bouncedRes = await webhookPOST(req({
+      body: { type: 'email.bounced', data: { email_id: 'resend-msg-dtb' } },
+    }));
+    expect(bouncedRes.status).toBe(200);
+    const [afterBounced] = await db.select().from(emailMessages)
+      .where(eq(emailMessages.providerMessageId, 'resend-msg-dtb'));
+    expect(afterBounced.deliveryStatus).toBe('bounced'); // flips — bounced outranks delivered now
+
+    // And a stale re-delivery of the earlier "delivered" event can't flip it back.
+    const staleDeliveredRes = await webhookPOST(req({
+      body: { type: 'email.delivered', data: { email_id: 'resend-msg-dtb' } },
+    }));
+    expect(staleDeliveredRes.status).toBe(200);
+    const [afterStale] = await db.select().from(emailMessages)
+      .where(eq(emailMessages.providerMessageId, 'resend-msg-dtb'));
+    expect(afterStale.deliveryStatus).toBe('bounced');
+  });
+
+  it('P2-7 carry-in: a duplicate svix-id delivery RE-APPLIES the forward-only status update (heals a crash between the events insert and the status update)', async () => {
+    await db.insert(emailMessages).values({
+      sendKey: 'webhook-test:crash-window', type: 'leadership_report', meetingId: null,
+      recipients: ['x@example.com'], subject: 'x', state: 'sent', providerMessageId: 'resend-msg-crash',
+    });
+
+    const eventId = nextEventId();
+    const timestamp = nowTimestampSeconds();
+    const body: WebhookPayload = { type: 'email.delivered', data: { email_id: 'resend-msg-crash' } };
+
+    // Simulate the crash: the events row already exists (as if a prior
+    // delivery got as far as the email_events insert) but the message's
+    // deliveryStatus was NEVER actually applied.
+    await db.insert(emailEvents).values({
+      providerEventId: eventId, messageId: null, eventType: body.type, occurredAt: new Date(), payload: body,
+    });
+    const [beforeRedelivery] = await db.select().from(emailMessages)
+      .where(eq(emailMessages.providerMessageId, 'resend-msg-crash'));
+    expect(beforeRedelivery.deliveryStatus).toBeNull();
+
+    // Resend's at-least-once redelivery of the SAME event arrives — under
+    // the old early-return-on-duplicate logic this would be a permanent
+    // no-op; it must now still apply the status.
+    const res = await webhookPOST(req({ id: eventId, timestamp, body }));
+    expect(res.status).toBe(200);
+    const responseBody = await res.json();
+    expect(responseBody.duplicate).toBe(true); // still a duplicate event...
+    expect(responseBody.messageUpdated).toBe(true); // ...but the status DID get applied this time
+
+    const [afterRedelivery] = await db.select().from(emailMessages)
+      .where(eq(emailMessages.providerMessageId, 'resend-msg-crash'));
+    expect(afterRedelivery.deliveryStatus).toBe('delivered');
+
+    // Still exactly one email_events row — the insert itself stayed a no-op.
+    const events = await db.select().from(emailEvents).where(eq(emailEvents.providerEventId, eventId));
+    expect(events).toHaveLength(1);
+  });
+
+  it('a genuine duplicate delivery of an ALREADY-APPLIED status is a true no-op (messageUpdated: false)', async () => {
+    await db.insert(emailMessages).values({
+      sendKey: 'webhook-test:already-applied', type: 'leadership_report', meetingId: null,
+      recipients: ['x@example.com'], subject: 'x', state: 'sent', providerMessageId: 'resend-msg-applied',
+    });
+    const eventId = nextEventId();
+    const timestamp = nowTimestampSeconds();
+    const body: WebhookPayload = { type: 'email.delivered', data: { email_id: 'resend-msg-applied' } };
+
+    const first = await webhookPOST(req({ id: eventId, timestamp, body }));
+    expect((await first.json()).messageUpdated).toBe(true);
+
+    const second = await webhookPOST(req({ id: eventId, timestamp, body }));
+    const secondBody = await second.json();
+    expect(secondBody.duplicate).toBe(true);
+    expect(secondBody.messageUpdated).toBe(false); // already at that rank — nothing left to apply
+  });
+
   it('out-of-order delivery: a "sent" event arriving after "delivered" does not regress the status', async () => {
     await db.insert(emailMessages).values({
       sendKey: 'webhook-test:ooo', type: 'leadership_report', meetingId: null,

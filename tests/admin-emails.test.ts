@@ -10,7 +10,7 @@ import { setDb } from '@/lib/db';
 import { emailMessages, meetings, settings } from '@/db/schema';
 import { getOrCreateMeetingFor } from '@/lib/meetings';
 import { registerVisitor } from '@/lib/visitors';
-import { createDrafts } from '@/lib/emails/engine';
+import { createDrafts, ensureRsvpNotice } from '@/lib/emails/engine';
 import { runWeeklyExport } from '@/lib/emails/export';
 import { visitorThankyouSubject } from '@/emails/visitor-thankyou';
 import { GET as emailsGET, POST as emailsPOST } from '@/app/api/admin/emails/route';
@@ -99,6 +99,29 @@ describe('admin emails API (app/api/admin/emails)', () => {
       expect(exportRow.label).toBe('Weekly export');
       expect(exportRow.state).toBe('sent');
       expect(exportRow.meetingId).toBeNull();
+    });
+
+    it('includes rsvp_notice rows (P2-6 carry-in — previously invisible, breaking failed-rows recovery)', async () => {
+      const [notice] = await db.insert(emailMessages).values({
+        sendKey: 'rsvp_notice:some-token', type: 'rsvp_notice', meetingId: null,
+        recipients: ['barriosj4@gmail.com'], subject: 'Dana Whitfield plans to visit Wednesday',
+        state: 'failed', error: 'Failed after 3 attempts: boom',
+      }).returning();
+
+      const body = (await (await emailsGET()).json()) as { messages: EmailMessageOut[] };
+      const found = body.messages.find((m) => m.id === notice.id);
+      expect(found).toBeTruthy();
+      expect(found!.label).toBe('RSVP notice');
+      expect(found!.state).toBe('failed');
+      expect(found!.meetingId).toBeNull();
+
+      // Retry (Send now on a failed row) works exactly like any other
+      // failed row — the whole point of surfacing it here at all.
+      const fetchMock = mockFetchOk('rsvp-recovered-1');
+      vi.stubGlobal('fetch', fetchMock);
+      const retryRes = await emailsPOST(post('/api/admin/emails', { action: 'sendNow', id: notice.id }));
+      expect(retryRes.status).toBe(200);
+      expect((await retryRes.json()).message.state).toBe('sent');
     });
 
     it('reflects SAFE_MODE from the environment (review carry-in)', async () => {
@@ -391,5 +414,137 @@ describe('admin settings API (app/api/admin/settings)', () => {
   it('an empty body is rejected as "no changes to save"', async () => {
     const res = await settingsPOST(post('/api/admin/settings', {}));
     expect(res.status).toBe(400);
+  });
+
+  // P2-6 carry-in: rsvpNotifyCarey / careyEmail (settings columns added by
+  // migration 0007) — the toggle can only ever end up ON with an address
+  // actually on file.
+  describe('rsvpNotifyCarey / careyEmail (P2-6 carry-in)', () => {
+    it('defaults to off, with no address on file', async () => {
+      const res = await settingsGET();
+      const body = await res.json();
+      expect(body.settings.rsvpNotifyCarey).toBe(false);
+      expect(body.settings.careyEmail).toBeNull();
+    });
+
+    it('turning the toggle on with no careyEmail already stored is rejected', async () => {
+      const res = await settingsPOST(post('/api/admin/settings', { rsvpNotifyCarey: true }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Add Carey's email before turning this on.");
+    });
+
+    it('setting careyEmail alone (toggle still off) is accepted', async () => {
+      const res = await settingsPOST(post('/api/admin/settings', { careyEmail: 'carey@example.com' }));
+      expect(res.status).toBe(200);
+      expect((await res.json()).settings.careyEmail).toBe('carey@example.com');
+    });
+
+    it('turning the toggle on once an address is already stored is accepted', async () => {
+      await settingsPOST(post('/api/admin/settings', { careyEmail: 'carey@example.com' }));
+      const res = await settingsPOST(post('/api/admin/settings', { rsvpNotifyCarey: true }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.settings.rsvpNotifyCarey).toBe(true);
+      expect(body.settings.careyEmail).toBe('carey@example.com');
+    });
+
+    it('setting BOTH fields together in one request is accepted', async () => {
+      const res = await settingsPOST(post('/api/admin/settings', {
+        rsvpNotifyCarey: true, careyEmail: 'carey@example.com',
+      }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.settings.rsvpNotifyCarey).toBe(true);
+      expect(body.settings.careyEmail).toBe('carey@example.com');
+    });
+
+    it('clearing careyEmail back to null while the toggle is already on is rejected (would silently notify nobody)', async () => {
+      await settingsPOST(post('/api/admin/settings', { rsvpNotifyCarey: true, careyEmail: 'carey@example.com' }));
+      const res = await settingsPOST(post('/api/admin/settings', { careyEmail: null }));
+      expect(res.status).toBe(400);
+      expect((await res.json()).error).toBe("Add Carey's email before turning this on.");
+
+      // Nothing changed — still on with the old address, not silently
+      // half-cleared.
+      const after = await (await settingsGET()).json();
+      expect(after.settings.careyEmail).toBe('carey@example.com');
+      expect(after.settings.rsvpNotifyCarey).toBe(true);
+    });
+
+    it('turning the toggle off while clearing careyEmail in the SAME request is accepted', async () => {
+      await settingsPOST(post('/api/admin/settings', { rsvpNotifyCarey: true, careyEmail: 'carey@example.com' }));
+      const res = await settingsPOST(post('/api/admin/settings', { rsvpNotifyCarey: false, careyEmail: null }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.settings.rsvpNotifyCarey).toBe(false);
+      expect(body.settings.careyEmail).toBeNull();
+    });
+
+    it('rejects a malformed careyEmail', async () => {
+      const res = await settingsPOST(post('/api/admin/settings', { careyEmail: 'not-an-email' }));
+      expect(res.status).toBe(400);
+    });
+  });
+});
+
+// P2-6 carry-in: ensureRsvpNotice adds Carey as a second recipient only
+// when BOTH rsvpNotifyCarey is true AND careyEmail is set.
+describe('lib/emails/engine ensureRsvpNotice — Carey recipient (P2-6 carry-in)', () => {
+  let db: TestDb;
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seed(db);
+    setDb(db);
+    vi.stubEnv('AUTH_RESEND_KEY', 'test-key');
+    vi.stubEnv('EMAIL_FROM', 'bni@amplysystems.com');
+    vi.stubEnv('EMAIL_SAFE_MODE', '0');
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it('recipients stay owner-only when the toggle is off, even with an address on file', async () => {
+    vi.stubGlobal('fetch', mockFetchOk('carey-1'));
+    await db.update(settings).set({ rsvpNotifyCarey: false, careyEmail: 'carey@example.com' }).where(eq(settings.id, 1));
+
+    const result = await ensureRsvpNotice(db, { token: 'tok-1', purpose: 'rsvp', personFullName: 'Val Visitor' });
+    expect(result?.recipients).toEqual(['barriosj4@gmail.com']);
+  });
+
+  it('recipients stay owner-only when the toggle is on but no address is on file', async () => {
+    vi.stubGlobal('fetch', mockFetchOk('carey-2'));
+    await db.update(settings).set({ rsvpNotifyCarey: true, careyEmail: null }).where(eq(settings.id, 1));
+
+    const result = await ensureRsvpNotice(db, { token: 'tok-2', purpose: 'rsvp', personFullName: 'Val Visitor' });
+    expect(result?.recipients).toEqual(['barriosj4@gmail.com']);
+  });
+
+  it('Carey is added as a second recipient when BOTH the toggle is on AND an address is on file', async () => {
+    vi.stubGlobal('fetch', mockFetchOk('carey-3'));
+    await db.update(settings).set({ rsvpNotifyCarey: true, careyEmail: 'carey@example.com' }).where(eq(settings.id, 1));
+
+    const result = await ensureRsvpNotice(db, { token: 'tok-3', purpose: 'rsvp', personFullName: 'Val Visitor' });
+    expect(result?.recipients).toEqual(['barriosj4@gmail.com', 'carey@example.com']);
+  });
+
+  it('SAFE_MODE still redirects everything to the owner even with Carey enabled', async () => {
+    vi.stubEnv('EMAIL_SAFE_MODE', '1');
+    const fetchMock = mockFetchOk('carey-4');
+    vi.stubGlobal('fetch', fetchMock);
+    await db.update(settings).set({ rsvpNotifyCarey: true, careyEmail: 'carey@example.com' }).where(eq(settings.id, 1));
+
+    await ensureRsvpNotice(db, { token: 'tok-4', purpose: 'rsvp', personFullName: 'Val Visitor' });
+
+    // The STORED row still lists Carey as an intended recipient (recipients
+    // reflects who was addressed, not who actually received it under SAFE
+    // MODE) — the actual Resend payload sent is what's redirected, which
+    // is send.ts's job (already covered by tests/emails-send.test.ts), not
+    // this row.
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const callBody = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+    expect(callBody.to).toEqual(['barriosj4@gmail.com']); // redirected — Carey never actually sent to
   });
 });

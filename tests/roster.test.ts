@@ -164,4 +164,34 @@ describe('changeStatus', () => {
     expect(err).toBeInstanceOf(ChangeStatusError);
     expect((err as ChangeStatusError).code).toBe('person_not_found');
   });
+
+  // P2-2 fast-follow (Task 8 carry-in): two concurrent changeStatus calls
+  // for the SAME person, each targeting a different member/visitor status
+  // from a starting point ('leadership') that makes both calls close-then-
+  // insert. Real interleaving against PGlite via Promise.allSettled (same
+  // pattern as tests/visitors.test.ts's concurrent registerVisitor test) —
+  // both calls must settle FULFILLED (no raw 23505 crash), and the DB must
+  // never end up with more than one open membership row afterward.
+  it('two racing changeStatus calls (member vs visitor) both settle fulfilled and leave exactly one open membership', async () => {
+    const mike = await personByName(db, 'Mike Anderson');
+    await changeStatus(db, { personId: mike.id, to: 'leadership', by: 'admin:setup@example.com' });
+    expect(await openMembershipsFor(db, mike.id)).toHaveLength(0);
+
+    const results = await Promise.allSettled([
+      changeStatus(db, { personId: mike.id, to: 'member', by: 'admin:a@example.com' }),
+      changeStatus(db, { personId: mike.id, to: 'visitor', by: 'admin:b@example.com' }),
+    ]);
+
+    expect(results[0].status).toBe('fulfilled');
+    expect(results[1].status).toBe('fulfilled');
+    const values = results.map((r) => (r as PromiseFulfilledResult<Awaited<ReturnType<typeof changeStatus>>>).value);
+    expect(values.every((v) => v.status === 'member' || v.status === 'visitor')).toBe(true);
+
+    // Leadership role was removed by whichever call ran the delete/insert
+    // first; the partial unique index guarantees at most one open row no
+    // matter how the two calls interleaved.
+    const open = await openMembershipsFor(db, mike.id);
+    expect(open.length).toBeLessThanOrEqual(1);
+    expect(await leadershipRolesFor(db, mike.id)).toHaveLength(0);
+  });
 });

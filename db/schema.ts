@@ -224,6 +224,19 @@ export const settings = pgTable('settings', {
   thankyouSendTime: text('thankyou_send_time').notNull().default('17:00'),
   reportRecipients: jsonb('report_recipients').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
   openSeats: jsonb('open_seats').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
+  // Phase 2 Task 8 (P2-6 carry-in): the RSVP owner-notification's optional
+  // second recipient. Two columns, not one — there was never a place to
+  // enter Carey's actual address, so the toggle alone would have nothing to
+  // notify. lib/emails/engine.ts's ensureRsvpNotice only adds careyEmail to
+  // the notification's recipients when BOTH rsvpNotifyCarey is true AND
+  // careyEmail is non-null; the admin email-center toggle (app/admin/
+  // admin-client.tsx) mirrors that same pairing client-side (disabled with
+  // "Add Carey's email first" until an address is on file) and
+  // app/api/admin/settings' POST enforces it server-side too, so the two
+  // columns can never end up meaningfully split (toggle on, no address) via
+  // any path that goes through this app.
+  rsvpNotifyCarey: boolean('rsvp_notify_carey').notNull().default(false),
+  careyEmail: text('carey_email'),
 }, (t) => [
   check('settings_singleton', sql`${t.id} = 1`),
 ]);

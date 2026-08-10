@@ -251,6 +251,87 @@ describe('compileForMeeting', () => {
     expect(line).toBe('Last 6 weeks: 1 · 2 · 1 · 1');
   });
 
+  it('a canceled meeting in the window is excluded from last-6-weeks entirely, not shown as a 0 (P2-3 minor #5)', async () => {
+    const jason = await personByName('Jason Barrios');
+
+    const [wk1] = await db.insert(meetings).values({
+      meetingDate: '2026-07-29', startsAt: new Date('2026-07-29T20:30:00Z'),
+    }).returning();
+    await db.insert(attendance).values({ personId: jason.id, meetingId: wk1.id, kind: 'member', checkedInBy: 'kiosk' });
+
+    // A canceled meeting the following week — never actually happened, so
+    // it must not appear at all (neither as a real count nor as a 0).
+    await db.insert(meetings).values({
+      meetingDate: '2026-08-05', startsAt: new Date('2026-08-05T20:30:00Z'), status: 'canceled',
+    });
+
+    const meeting = await getOrCreateMeetingFor(db, TARGET_NOW); // 2026-08-12
+    await checkIn(db, { personId: jason.id, clientOpId: 'cancel-target-1', source: 'kiosk', now: TARGET_NOW });
+
+    const { drafts } = await compileForMeeting(db, meeting.id);
+    const report = drafts.find((d) => d.type === 'leadership_report')!;
+    const line = report.text.split('\n').find((l) => l.startsWith('Last 6 weeks:'))!;
+    // wk1=1, canceled week skipped entirely, target=1 — only two entries.
+    expect(line).toBe('Last 6 weeks: 1 · 1');
+  });
+
+  describe('possible-repeat-visitor note (P2-6 carry-in)', () => {
+    it('flags a present visitor whose email matches a DIFFERENT person with 2+ prior visits', async () => {
+      // "Original" — a different person row, already at 2 prior visits.
+      const priorWeek1 = new Date('2026-07-29T19:00:00Z');
+      const priorWeek2 = new Date('2026-08-05T19:00:00Z');
+      const { person: original } = await registerVisitor(db, {
+        fullName: 'Original Person', industry: 'Roofing', company: null,
+        email: 'shared-repeat@example.com', phone: null, clientOpId: 'orig-1', now: priorWeek1,
+      });
+      await checkIn(db, { personId: original!.id, clientOpId: 'orig-2', source: 'kiosk', now: priorWeek2 });
+
+      // "New" registration, same email, present at TODAY's meeting — a
+      // fresh person row (e.g. the kiosk form filled out again).
+      const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
+      await registerVisitor(db, {
+        fullName: 'Newly Registered', industry: 'Roofing', company: null,
+        email: 'shared-repeat@example.com', phone: null, clientOpId: 'newreg-1', now: TARGET_NOW,
+      });
+
+      const { drafts } = await compileForMeeting(db, meeting.id);
+      const report = drafts.find((d) => d.type === 'leadership_report')!;
+      expect(report.text).toContain('Possible repeat visitor');
+      expect(report.text).toContain('Newly Registered (shared-repeat@example.com) may be the same person as Original Person, who has 2 prior visits.');
+      expect(report.html).toContain('Possible repeat visitor');
+    });
+
+    it('does not flag a visitor on their own genuine 2nd visit (same person id, not a different record)', async () => {
+      const priorWeek = new Date('2026-08-05T19:00:00Z');
+      const { person } = await registerVisitor(db, {
+        fullName: 'Genuine Repeat', industry: 'HVAC', company: null,
+        email: 'genuine-repeat@example.com', phone: null, clientOpId: 'genuine-1', now: priorWeek,
+      });
+      const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
+      await checkIn(db, { personId: person!.id, clientOpId: 'genuine-2', source: 'kiosk', now: TARGET_NOW });
+
+      const { drafts } = await compileForMeeting(db, meeting.id);
+      const report = drafts.find((d) => d.type === 'leadership_report')!;
+      expect(report.text).not.toContain('Possible repeat visitor');
+    });
+
+    it('does not flag two unrelated visitors sharing an email who each only have 1 visit', async () => {
+      const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
+      await registerVisitor(db, {
+        fullName: 'Household One', industry: 'Retail', company: null,
+        email: 'household@example.com', phone: null, clientOpId: 'hh-1', now: TARGET_NOW,
+      });
+      await registerVisitor(db, {
+        fullName: 'Household Two', industry: 'Retail', company: null,
+        email: 'household@example.com', phone: null, clientOpId: 'hh-2', now: TARGET_NOW,
+      });
+
+      const { drafts } = await compileForMeeting(db, meeting.id);
+      const report = drafts.find((d) => d.type === 'leadership_report')!;
+      expect(report.text).not.toContain('Possible repeat visitor');
+    });
+  });
+
   // Phase 2 Task 6: RSVP/interest token wiring.
   describe('RSVP token wiring', () => {
     it('v1 thank-you CTA links to a real /rsvp/{token} page for the NEXT meeting — no mailto', async () => {

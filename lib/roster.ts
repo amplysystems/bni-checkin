@@ -1,6 +1,7 @@
 import { and, eq, isNull } from 'drizzle-orm';
 import { memberships, people, personRoles } from '@/db/schema';
 import type { Db } from '@/lib/db';
+import { isUniqueViolation } from '@/lib/checkins';
 
 export type StatusTarget = 'member' | 'leadership' | 'visitor';
 export type DerivedStatus = StatusTarget | 'former_member' | 'none';
@@ -76,7 +77,28 @@ export async function changeStatus(db: Db, { personId, to, by }: ChangeStatusInp
     // plan's one documented non-append exception.
     await db.delete(personRoles)
       .where(and(eq(personRoles.personId, personId), eq(personRoles.role, 'leadership')));
-    await db.insert(memberships).values({ personId, status: to });
+    try {
+      await db.insert(memberships).values({ personId, status: to });
+    } catch (err) {
+      // P2-2 fast-follow: a racing changeStatus call for this SAME person
+      // (two admin taps, or an admin tap racing a kiosk-driven transition)
+      // can close-then-insert between our own close (above) and this
+      // insert, so uniq_open_membership (db/schema.ts) rejects our insert
+      // with 23505 even though we just closed everything that was open a
+      // moment ago. Same posture as checkIn's own dedupe-on-unique-
+      // violation path (lib/checkins.ts): a graceful re-read and report of
+      // whatever actually landed, not a raw 500 for what is, from the
+      // admin's point of view, a double-tap.
+      if (!isUniqueViolation(err)) throw err;
+      const resolved = await resolvePersonStatus(db, personId);
+      if (resolved === 'member' || resolved === 'visitor') {
+        return { changed: resolved !== current, status: resolved };
+      }
+      // Vanishingly unlikely (the winner's own row would have to have been
+      // closed again before this re-read) — fall back to reporting the
+      // target the caller asked for rather than surfacing the raw error.
+      return { changed: false, status: to };
+    }
   }
 
   // No dedicated audit table for this transition (out of scope for this

@@ -10,21 +10,37 @@ import { requireAdmin } from '@/lib/admin-guard';
 // ids — no N+1 as the list grows.
 const MEETING_LIMIT = 26;
 
-export async function GET() {
+// Task 8: "Show earlier" pagination — req reads the ?offset= query param,
+// same required-Request convention as app/api/admin/roster/route.ts's own
+// GET (an optional param here would satisfy this file's own callers, but
+// Next.js' generated route type-check requires an App Router GET's
+// parameter type to be exactly Request|NextRequest, not Request|undefined
+// — see .next/types' own ParamCheck).
+export async function GET(req: Request) {
   const guard = await requireAdmin();
   if (guard instanceof Response) return guard;
   const db = getDb();
+
+  const rawOffset = Number(new URL(req.url).searchParams.get('offset') ?? '0');
+  const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? Math.floor(rawOffset) : 0;
 
   // No status filter ("excluding none") and no date-range cutoff beyond the
   // LIMIT itself — today's meeting row (created via getOrCreateMeetingFor
   // as soon as the kiosk roster or admin attendance panel is loaded today)
   // is included like any other once it exists.
-  const meetingRows = await db.select().from(meetings)
+  //
+  // Fetches one extra row (MEETING_LIMIT + 1) beyond the page size purely to
+  // answer "is there another page" without a second COUNT query — sliced
+  // back down to MEETING_LIMIT before it's ever used for anything else.
+  const rawRows = await db.select().from(meetings)
     .orderBy(desc(meetings.meetingDate))
-    .limit(MEETING_LIMIT);
+    .limit(MEETING_LIMIT + 1)
+    .offset(offset);
+  const hasMore = rawRows.length > MEETING_LIMIT;
+  const meetingRows = rawRows.slice(0, MEETING_LIMIT);
 
   if (meetingRows.length === 0) {
-    return Response.json({ meetings: [] });
+    return Response.json({ meetings: [], hasMore: false });
   }
 
   const meetingIds = meetingRows.map((m) => m.id);
@@ -63,5 +79,5 @@ export async function GET() {
     };
   });
 
-  return Response.json({ meetings: result });
+  return Response.json({ meetings: result, hasMore });
 }

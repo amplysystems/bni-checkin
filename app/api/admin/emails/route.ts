@@ -32,6 +32,12 @@ const MEETING_LIMIT = 8;
 // header comment on the type column) — capped separately, generously
 // enough that "latest export" never has to reach past what's returned here.
 const WEEKLY_EXPORT_LIMIT = 5;
+// P2-6 carry-in (Task 8): rsvp_notice rows also have no meetingId — same
+// "recent, not an archive" reasoning as WEEKLY_EXPORT_LIMIT above, sized a
+// bit more generously since these are the failed-rows-recovery invariant's
+// whole reason for being included here at all (a failed/stuck rsvp_notice
+// otherwise has no other admin surface to retry from).
+const RSVP_NOTICE_LIMIT = 20;
 
 function labelFor(message: EmailMessage, nameByEmail: Map<string, string>): string {
   switch (message.type) {
@@ -47,6 +53,11 @@ function labelFor(message: EmailMessage, nameByEmail: Map<string, string>): stri
     case 'leadership_report': return 'Weekly report';
     case 'approval_notice': return 'Approval notice';
     case 'weekly_export': return 'Weekly export';
+    // The subject line already names who and what ("{fullName} plans to
+    // visit Wednesday" / "{fullName} is interested in membership" — see
+    // emails/rsvp-notice.ts), which EmailRow renders right below this
+    // label — no name lookup needed the way visitor_thankyou's does.
+    case 'rsvp_notice': return 'RSVP notice';
     default: return message.type;
   }
 }
@@ -68,8 +79,16 @@ export async function GET() {
     .where(eq(emailMessages.type, 'weekly_export'))
     .orderBy(desc(emailMessages.createdAt))
     .limit(WEEKLY_EXPORT_LIMIT);
+  // P2-6 REQUIRED carry-in: rsvp_notice rows (meetingId always null) were
+  // entirely absent from this listing before — invisible when failed,
+  // which broke the failed-rows-recovery invariant this whole route exists
+  // to satisfy (see this file's own header comment).
+  const rsvpNoticeMessages = await db.select().from(emailMessages)
+    .where(eq(emailMessages.type, 'rsvp_notice'))
+    .orderBy(desc(emailMessages.createdAt))
+    .limit(RSVP_NOTICE_LIMIT);
 
-  const allMessages = [...meetingMessages, ...weeklyExportMessages];
+  const allMessages = [...meetingMessages, ...weeklyExportMessages, ...rsvpNoticeMessages];
 
   // Visitor display names: a best-effort join of the stored recipient email
   // against the current roster (not a stored personId — email_messages

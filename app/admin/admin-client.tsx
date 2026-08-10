@@ -64,12 +64,14 @@ type AdminMeeting = {
   attendees: MeetingAttendee[];
 };
 
-type MeetingsResponse = { meetings: AdminMeeting[] };
+// Task 8: "Show earlier" pagination — hasMore tells the panel whether
+// there's another page worth offering a button for.
+type MeetingsResponse = { meetings: AdminMeeting[]; hasMore: boolean };
 
 // ---- Emails (Phase 2 Task 5) types (mirrored from app/api/admin/emails and
 // app/api/admin/settings' contracts) --------------------------------------
 
-type EmailType = 'leadership_report' | 'visitor_thankyou' | 'approval_notice' | 'weekly_export';
+type EmailType = 'leadership_report' | 'visitor_thankyou' | 'approval_notice' | 'weekly_export' | 'rsvp_notice';
 type EmailState = 'draft' | 'awaiting_approval' | 'approved' | 'scheduled' | 'sending' | 'sent' | 'failed';
 // Phase 2 Task 7: null until the first Resend webhook event for this
 // message lands (see db/schema.ts's delivery_status column comment).
@@ -99,6 +101,11 @@ type EmailSettings = {
   reportSendTime: string;
   thankyouSendTime: string;
   reportRecipients: string[];
+  // P2-6 carry-in (Task 8): the RSVP owner-notification's optional second
+  // recipient — see db/schema.ts's rsvpNotifyCarey/careyEmail comment for
+  // why this is two fields, not one.
+  rsvpNotifyCarey: boolean;
+  careyEmail: string | null;
 };
 
 type SettingsResponse = { settings: EmailSettings };
@@ -122,7 +129,8 @@ type DialogState = { mode: 'create' } | { mode: 'edit'; person: AdminPerson } | 
 
 type LoadResult =
   | {
-      ok: true; people: AdminPerson[]; attendance: AttendanceRow[]; meetingDate: string; meetings: AdminMeeting[];
+      ok: true; people: AdminPerson[]; attendance: AttendanceRow[]; meetingDate: string;
+      meetings: AdminMeeting[]; meetingsHasMore: boolean;
       emailMessages: EmailMessageRow[]; emailSettings: EmailSettings; emailSafeMode: boolean;
     }
   | { ok: false };
@@ -244,10 +252,18 @@ async function postJson<T>(
   }
 }
 
-function attendanceErrorMessage(result: { status: number; error?: string }): string {
+export function attendanceErrorMessage(result: { status: number; error?: string }): string {
   if (result.status === 400) {
     if (result.error === 'person_deactivated') return "Can't check in — that person is deactivated.";
     if (result.error === 'person_not_found') return 'Person not found — refreshing.';
+    // P2-6 carry-in: lib/checkins.ts's CheckInError('visit_limit') reaches
+    // here as a plain 400 with no further detail — point straight at the
+    // fix (the roster row's "Allow another visit" action) instead of the
+    // generic fallback below, which told an admin something went wrong
+    // without saying what to actually do about it.
+    if (result.error === 'visit_limit') {
+      return "They've used their two visitor meetings — use Allow another visit in the roster first.";
+    }
     return GENERIC_ERROR;
   }
   if (result.status === 409) return 'Conflict — try again.';
@@ -264,7 +280,7 @@ function changeStatusRequest(personId: string, to: CreateStatus) {
   });
 }
 
-function changeStatusErrorMessage(result: { status: number; error?: string }): string {
+export function changeStatusErrorMessage(result: { status: number; error?: string }): string {
   if (result.status === 400 && result.error === 'person_deactivated') {
     return "Can't change status — that person is deactivated.";
   }
@@ -278,6 +294,14 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [attendance, setAttendance] = useState<AttendanceRow[] | null>(null);
   const [meetingDate, setMeetingDate] = useState<string | null>(null);
   const [meetings, setMeetings] = useState<AdminMeeting[] | null>(null);
+  // Task 8 "Show earlier" pagination: whether the server has more meetings
+  // past what's currently loaded, and whether a page-2+ fetch is in flight.
+  // Every loadAll() refresh (mount, or after any mutation) re-fetches just
+  // page 1 and collapses back to it — see handleShowEarlierMeetings' own
+  // comment for why that's the deliberate, simpler choice over trying to
+  // preserve an expanded page count across an unrelated refresh.
+  const [meetingsHasMore, setMeetingsHasMore] = useState(false);
+  const [loadingMoreMeetings, setLoadingMoreMeetings] = useState(false);
   const [emailMessages, setEmailMessages] = useState<EmailMessageRow[] | null>(null);
   const [emailSettings, setEmailSettings] = useState<EmailSettings | null>(null);
   const [emailSafeMode, setEmailSafeMode] = useState(false);
@@ -381,6 +405,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
         attendance: attData.attendance,
         meetingDate: attData.meetingDate,
         meetings: meetingsData.meetings,
+        meetingsHasMore: meetingsData.hasMore,
         emailMessages: emailsData.messages,
         emailSettings: settingsData.settings,
         emailSafeMode: emailsData.safeMode,
@@ -397,6 +422,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
       setAttendance(result.attendance);
       setMeetingDate(result.meetingDate);
       setMeetings(result.meetings);
+      setMeetingsHasMore(result.meetingsHasMore);
       setEmailMessages(result.emailMessages);
       setEmailSettings(result.emailSettings);
       setEmailSafeMode(result.emailSafeMode);
@@ -562,6 +588,21 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     const fields = buildUpdateFields(form, dialog.person);
     const hasFieldChanges = Object.keys(fields).length > 0;
 
+    // P2-2 fast-follow: parity with the roster row's one-tap "Make member"
+    // (handleMakeMember below), which already confirms — editing status via
+    // the dialog's Save button was the one status-changing path with no
+    // confirmation step at all.
+    if (statusChanged) {
+      const confirmed = window.confirm(
+        `Change ${dialog.person.fullName}'s status to ${STATUS_META[form.status].label}? `
+        + "Their check-in history stays intact either way.",
+      );
+      if (!confirmed) {
+        setSaving(false);
+        return;
+      }
+    }
+
     if (statusChanged) {
       const statusResult = await changeStatusRequest(dialog.person.id, form.status);
       if (!statusResult.ok) {
@@ -582,12 +623,24 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
       });
       if (!fieldsResult.ok) {
         setSaving(false);
+        // P2-2 fast-follow: the status POST above already committed — the
+        // person really is reclassified now, even though this second POST
+        // failed. Say so explicitly (rather than a plain "check the fields"
+        // message that reads as "nothing happened yet") AND resync the
+        // background roster/attendance/meetings state now, so the rest of
+        // the admin UI behind this still-open dialog reflects the status
+        // change immediately instead of waiting for some unrelated future
+        // reload.
+        const statusNote = statusChanged
+          ? ` Status was already changed to ${STATUS_META[form.status].label} — that part saved.`
+          : '';
         if (fieldsResult.status === 400) {
-          setFormError('Check the highlighted fields and try again.');
+          setFormError(`Check the highlighted fields and try again.${statusNote}`);
         } else {
-          setFormError(SAVE_CONNECTION_ERROR);
+          setFormError(`${SAVE_CONNECTION_ERROR}${statusNote}`);
           showToast(GENERIC_ERROR);
         }
+        if (statusChanged) loadAll();
         return;
       }
     }
@@ -680,6 +733,37 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     showToast(`${person.fullName} can check in one more time`);
     loadAll();
   }, [allowingExtraVisitId, showToast, loadAll]);
+
+  // ---- Meetings panel: "Show earlier" pagination (Task 8) ----
+  // Appends the next page onto the already-loaded list, rather than
+  // replacing it — a click on "Show earlier" should only ever grow the
+  // list. Deliberately NOT preserved across a loadAll() refresh (mount, or
+  // after any mutation elsewhere on the page): loadAll always re-fetches
+  // just page 1 via fetchAdminData/applyLoadResult above, so an expanded
+  // list collapses back to 26 the next time anything else on the page
+  // changes. That's a real trade-off (an admin mid-scroll through history
+  // who then checks someone in loses their expanded view) accepted for
+  // simplicity — re-fetching N pages' worth after every unrelated mutation
+  // would need its own request-id bookkeeping on top of loadRequestIdRef's
+  // existing one, for a rarely-used, non-today-affecting view.
+  const handleShowEarlierMeetings = useCallback(async () => {
+    if (loadingMoreMeetings || !meetingsHasMore) return;
+    setLoadingMoreMeetings(true);
+    try {
+      const res = await fetch(`/api/admin/meetings?offset=${meetings?.length ?? 0}`);
+      if (!res.ok) {
+        showToast(GENERIC_ERROR);
+        return;
+      }
+      const data = (await res.json()) as MeetingsResponse;
+      setMeetings((prev) => [...(prev ?? []), ...data.meetings]);
+      setMeetingsHasMore(data.hasMore);
+    } catch {
+      showToast(GENERIC_ERROR);
+    } finally {
+      setLoadingMoreMeetings(false);
+    }
+  }, [loadingMoreMeetings, meetingsHasMore, meetings, showToast]);
 
   // ---- Emails panel: preview / approve / send now / retry / compile ----
 
@@ -792,6 +876,8 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
       reportSendTime: settingsForm.reportSendTime,
       thankyouSendTime: settingsForm.thankyouSendTime,
       reportRecipients: settingsForm.reportRecipients,
+      rsvpNotifyCarey: settingsForm.rsvpNotifyCarey,
+      careyEmail: settingsForm.careyEmail,
     });
     setSavingSettings(false);
     if (!result.ok) {
@@ -841,7 +927,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
         <div className="flex items-center gap-3 text-sm text-neutral-500 dark:text-neutral-400">
           <a
             href="/kiosk"
-            className="min-h-[44px] inline-flex items-center rounded-full border border-neutral-300 px-4 font-medium text-neutral-700 hover:bg-white dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+            className="min-h-[48px] inline-flex items-center rounded-full border border-neutral-300 px-4 font-medium text-neutral-700 hover:bg-white dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
           >
             View kiosk
           </a>
@@ -897,7 +983,13 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
                 onMakeMember={handleMakeMember}
                 onAllowExtraVisit={handleAllowExtraVisit}
               />
-              <MeetingsPanel meetings={meetings} todayDate={meetingDate} />
+              <MeetingsPanel
+                meetings={meetings}
+                todayDate={meetingDate}
+                hasMore={meetingsHasMore}
+                loadingMore={loadingMoreMeetings}
+                onShowEarlier={handleShowEarlierMeetings}
+              />
               <EmailsSection
                 messages={emailMessages}
                 safeMode={emailSafeMode}
@@ -1076,8 +1168,13 @@ function RosterPanel({
 
   return (
     <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm dark:bg-neutral-900">
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">Roster</h2>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">Roster</h2>
+          <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+            Everyone in the chapter — members, leadership, and visitors. Add someone, edit their details, or change their status here.
+          </p>
+        </div>
         <div className="flex items-center gap-4">
           <label className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-300">
             <input
@@ -1155,9 +1252,9 @@ function RosterRow({
   const atVisitLimit = person.status === 'visitor' && person.visitCount >= 2;
   return (
     <tr className={`border-t border-neutral-100 dark:border-neutral-800 ${deactivated ? 'opacity-60' : ''}`}>
-      <td className="px-3 py-3 text-sm font-medium text-neutral-900 dark:text-neutral-50">{person.fullName}</td>
-      <td className="px-3 py-3 text-sm text-neutral-600 dark:text-neutral-400">{person.industry ?? '—'}</td>
-      <td className="px-3 py-3 text-sm text-neutral-600 dark:text-neutral-400">
+      <td className="px-3 py-3 md:py-4 text-sm font-medium text-neutral-900 dark:text-neutral-50">{person.fullName}</td>
+      <td className="px-3 py-3 md:py-4 text-sm text-neutral-600 dark:text-neutral-400">{person.industry ?? '—'}</td>
+      <td className="px-3 py-3 md:py-4 text-sm text-neutral-600 dark:text-neutral-400">
         {person.email ?? '—'}
         {person.emailBounced && (
           // Phase 2 Task 7: this visitor's thank-you email bounced — a
@@ -1173,12 +1270,12 @@ function RosterRow({
           </span>
         )}
       </td>
-      <td className="px-3 py-3">
+      <td className="px-3 py-3 md:py-4">
         <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${meta.className}`}>
           {meta.label}
         </span>
       </td>
-      <td className="px-3 py-3 text-right text-sm">
+      <td className="px-3 py-3 md:py-4 text-right text-sm">
         {deactivated ? (
           <Button variant="ghost" tone="neutral" size="md" className="!px-0 !py-0" onClick={onReactivate} disabled={reactivating}>
             {reactivating ? 'Reactivating…' : 'Reactivate'}
@@ -1222,7 +1319,7 @@ function RosterRow({
               type="button"
               onClick={onEdit}
               disabled={deactivating}
-              className="mr-4 font-medium text-neutral-600 transition hover:underline disabled:opacity-50 dark:text-neutral-300"
+              className="mr-4 inline-flex min-h-[48px] items-center font-medium text-neutral-600 transition hover:underline disabled:opacity-50 dark:text-neutral-300"
             >
               Edit
             </button>
@@ -1264,7 +1361,15 @@ function ChevronIcon({ expanded }: { expanded: boolean }) {
   );
 }
 
-function MeetingsPanel({ meetings, todayDate }: { meetings: AdminMeeting[]; todayDate: string | null }) {
+function MeetingsPanel({
+  meetings, todayDate, hasMore, loadingMore, onShowEarlier,
+}: {
+  meetings: AdminMeeting[];
+  todayDate: string | null;
+  hasMore: boolean;
+  loadingMore: boolean;
+  onShowEarlier: () => void;
+}) {
   // Local, ephemeral UI state (which rows are expanded) — deliberately not
   // lifted to AdminClient: nothing else needs it, and it's fine for it to
   // reset if this component ever unmounts. It does, however, survive the
@@ -1302,6 +1407,14 @@ function MeetingsPanel({ meetings, todayDate }: { meetings: AdminMeeting[]; toda
               onToggle={() => toggle(m.id)}
             />
           ))}
+        </div>
+      )}
+
+      {hasMore && (
+        <div className="mt-4 flex justify-center">
+          <Button variant="secondary" onClick={onShowEarlier} disabled={loadingMore}>
+            {loadingMore ? 'Loading…' : 'Show earlier'}
+          </Button>
         </div>
       )}
     </section>
@@ -1474,20 +1587,41 @@ function DeliveryStatusChip({ message }: { message: EmailMessageRow }) {
 
 // The type ordering rows appear in within a meeting group — report first
 // (the "big picture" email), then thank-yous, then the internal
-// approval-notice housekeeping message last.
+// approval-notice housekeeping message last. rsvp_notice/weekly_export never
+// share a group with a meeting-scoped type (see groupEmailMessages below),
+// so their own relative order here doesn't matter — included for
+// completeness/exhaustiveness of the Record.
 const TYPE_ORDER: Record<EmailType, number> = {
-  leadership_report: 0, visitor_thankyou: 1, approval_notice: 2, weekly_export: 3,
+  leadership_report: 0, visitor_thankyou: 1, approval_notice: 2, weekly_export: 3, rsvp_notice: 4,
 };
 
-type MeetingEmailGroup = { meetingId: string | null; meetingDate: string | null; messages: EmailMessageRow[] };
+// P2-6 carry-in (Task 8): rsvp_notice rows (meetingId always null — an RSVP
+// token outlives any single meeting's compile) were previously invisible in
+// this admin view entirely, which broke the failed-rows-recovery invariant
+// (app/api/admin/emails' GET now includes them; this is the client half —
+// giving them somewhere to render). They get their OWN pseudo-group
+// ('notifications'), never merged with the pre-existing 'exports'
+// pseudo-group weekly_export rows use — the two types have nothing to do
+// with each other and merging them under one ambiguous "Weekly exports"
+// label would bury one inside the other.
+type PseudoGroupKind = 'meeting' | 'notifications' | 'exports';
+type MeetingEmailGroup = {
+  meetingId: string | null; meetingDate: string | null; kind: PseudoGroupKind; messages: EmailMessageRow[];
+};
 
-function groupEmailMessages(messages: EmailMessageRow[]): MeetingEmailGroup[] {
+function pseudoGroupKeyFor(m: EmailMessageRow): string {
+  if (m.meetingId) return m.meetingId;
+  return m.type === 'rsvp_notice' ? 'notifications' : 'exports';
+}
+
+export function groupEmailMessages(messages: EmailMessageRow[]): MeetingEmailGroup[] {
   const byKey = new Map<string, MeetingEmailGroup>();
   for (const m of messages) {
-    const key = m.meetingId ?? 'none';
+    const key = pseudoGroupKeyFor(m);
     let group = byKey.get(key);
     if (!group) {
-      group = { meetingId: m.meetingId, meetingDate: m.meetingDate, messages: [] };
+      const kind: PseudoGroupKind = m.meetingId ? 'meeting' : (key === 'notifications' ? 'notifications' : 'exports');
+      group = { meetingId: m.meetingId, meetingDate: m.meetingDate, kind, messages: [] };
       byKey.set(key, group);
     }
     group.messages.push(m);
@@ -1495,11 +1629,14 @@ function groupEmailMessages(messages: EmailMessageRow[]): MeetingEmailGroup[] {
   for (const group of byKey.values()) {
     group.messages.sort((a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || a.label.localeCompare(b.label));
   }
-  // Real meetings sort most-recent-first; the non-meeting (weekly export)
-  // group always sorts last — it isn't a week, it doesn't compete with them.
+  // Real meetings sort most-recent-first; the two non-meeting pseudo-groups
+  // always sort after every real meeting (neither is "a week," so neither
+  // competes with them) — notifications before exports, since a pending
+  // RSVP notice is closer to "needs attention now" than a backup file.
+  const kindRank: Record<PseudoGroupKind, number> = { meeting: 0, notifications: 1, exports: 2 };
   return Array.from(byKey.values()).sort((a, b) => {
-    if (a.meetingId === null) return 1;
-    if (b.meetingId === null) return -1;
+    if (a.kind !== b.kind) return kindRank[a.kind] - kindRank[b.kind];
+    if (a.kind !== 'meeting') return 0; // stable — only one of each pseudo-group ever exists
     return (b.meetingDate ?? '').localeCompare(a.meetingDate ?? '');
   });
 }
@@ -1571,9 +1708,11 @@ function EmailsSection({
       ) : (
         <div className="mt-4 flex flex-col gap-4">
           {groups.map((group) => (
-            <div key={group.meetingId ?? 'none'}>
+            <div key={group.meetingId ?? group.kind}>
               <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
-                {group.meetingDate ? formatMeetingDate(group.meetingDate) : 'Weekly exports'}
+                {group.kind === 'meeting' && group.meetingDate ? formatMeetingDate(group.meetingDate) : null}
+                {group.kind === 'notifications' ? 'Notifications' : null}
+                {group.kind === 'exports' ? 'Weekly exports' : null}
               </p>
               <div className="flex flex-col gap-2">
                 {group.messages.map((m) => (
@@ -1721,6 +1860,56 @@ function EmailsSection({
           )}
         </div>
 
+        {/* P2-6 carry-in: RSVP owner-notification's optional second
+            recipient. The toggle is disabled (not just unchecked) until an
+            address is on file — turning it on with nothing to notify would
+            silently do nothing, so the control itself refuses to offer
+            that state rather than relying on the save button's error to
+            catch it after the fact. */}
+        <div className="mt-4">
+          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">When a visitor RSVPs</p>
+          <label
+            className={`mt-2 flex items-start gap-3 rounded-xl bg-neutral-50 p-4 dark:bg-neutral-800/50 ${
+              settingsForm.careyEmail ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+            }`}
+          >
+            <input
+              type="checkbox"
+              checked={settingsForm.rsvpNotifyCarey}
+              disabled={!settingsForm.careyEmail}
+              onChange={(e) => onSettingsFormChange((f) => (f ? { ...f, rsvpNotifyCarey: e.target.checked } : f))}
+              className="mt-0.5 h-5 w-5 flex-none rounded border-neutral-300 dark:border-neutral-600"
+            />
+            <span>
+              <span className="block text-sm font-medium text-neutral-900 dark:text-neutral-50">
+                Also notify Carey when a visitor RSVPs
+              </span>
+              <span className="mt-0.5 block text-xs text-neutral-500 dark:text-neutral-400">
+                {settingsForm.careyEmail ? "Jason always gets this — this adds Carey too." : "Add Carey's email first."}
+              </span>
+            </span>
+          </label>
+          <div className="mt-2">
+            <DialogField label="Carey's email">
+              <input
+                type="email"
+                value={settingsForm.careyEmail ?? ''}
+                onChange={(e) => onSettingsFormChange((f) => {
+                  if (!f) return f;
+                  const trimmed = e.target.value.trim();
+                  const careyEmail = trimmed === '' ? null : e.target.value;
+                  // Clearing the address also switches the toggle back off
+                  // — otherwise it'd sit disabled-but-checked, a confusing
+                  // state that would only surface as an error at save time.
+                  return { ...f, careyEmail, rsvpNotifyCarey: careyEmail ? f.rsvpNotifyCarey : false };
+                })}
+                placeholder="carey@example.com"
+                className={ADMIN_INPUT_CLASS}
+              />
+            </DialogField>
+          </div>
+        </div>
+
         {settingsError && (
           <div className={`mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm dark:bg-red-950/40 ${RED_TEXT_CLASS}`}>
             {settingsError}
@@ -1780,7 +1969,7 @@ function EmailRow({
             type="button"
             onClick={onPreview}
             disabled={previewLoading}
-            className="font-medium text-neutral-600 transition hover:underline disabled:opacity-50 dark:text-neutral-300"
+            className="inline-flex min-h-[48px] items-center font-medium text-neutral-600 transition hover:underline disabled:opacity-50 dark:text-neutral-300"
           >
             {previewLoading ? 'Loading…' : 'Preview'}
           </button>

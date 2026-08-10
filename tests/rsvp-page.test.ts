@@ -57,6 +57,35 @@ describe('app/rsvp/[token]/page (server component)', () => {
     expect(html).not.toContain('Visitor'); // the surname half of "Val Visitor"
   });
 
+  // P2-6 carry-in (Task 8): a link opened long after its named Wednesday.
+  // Uses a targetDate far enough in the past (well before this repo
+  // existed) that it's guaranteed "passed" relative to the real wall clock
+  // regardless of when this test actually runs — no time injection needed
+  // since RsvpPage itself has no `now` parameter to inject through.
+  it('a stale (already-passed) rsvp token gets the "next one instead" headline, and calendar actions point at a real upcoming date', async () => {
+    const token = await getOrCreateRsvpToken(db, { personId, purpose: 'rsvp', targetDate: '2020-01-01' });
+    const el = await RsvpPage({ params: Promise.resolve({ token }) });
+    const html = renderToStaticMarkup(el);
+
+    expect(html).toContain('That Wednesday has passed');
+    expect(html).toMatch(/here(?:&#x27;|')s the next one, Val/);
+    expect(html).not.toMatch(/You(?:&#x27;|')re on the list for Wednesday, Val/);
+    // Still gets full calendar actions, all pointed at a date well after
+    // the stale 2020-01-01 the token originally named.
+    expect(html).toContain('Add with Google Calendar');
+    expect(html).not.toContain('2020-01-01');
+  });
+
+  it('a stale interest token still gets a coherent (non-2020) meeting-details date', async () => {
+    const token = await getOrCreateRsvpToken(db, { personId, purpose: 'interest', targetDate: '2020-01-01' });
+    const el = await RsvpPage({ params: Promise.resolve({ token }) });
+    const html = renderToStaticMarkup(el);
+
+    expect(html).toContain('Got it, Val');
+    expect(html).not.toContain('2020-01-01');
+    expect(html).not.toContain('January 1, 2020');
+  });
+
   it('valid interest token: the "Got it" variant, no calendar actions', async () => {
     const token = await getOrCreateRsvpToken(db, { personId, purpose: 'interest', targetDate: '2026-08-19' });
     const el = await RsvpPage({ params: Promise.resolve({ token }) });
