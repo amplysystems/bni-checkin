@@ -142,6 +142,25 @@ function formatTime(iso: string): string {
   }).format(new Date(iso));
 }
 
+const CLOCK_TICK_MS = 15_000;
+
+function formatClock(d: Date): string {
+  return new Intl.DateTimeFormat('en-US', {
+    hour: 'numeric', minute: '2-digit', timeZone: 'America/Chicago',
+  }).format(d);
+}
+
+// Live venue clock for the header pill. Lazy initializer + interval-driven
+// updates keep setState out of the effect body (react-hooks/set-state-in-effect).
+function useClock(): string {
+  const [time, setTime] = useState(() => formatClock(new Date()));
+  useEffect(() => {
+    const id = setInterval(() => setTime(formatClock(new Date())), CLOCK_TICK_MS);
+    return () => clearInterval(id);
+  }, []);
+  return time;
+}
+
 function formatMeetingDate(dateStr: string): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   const dt = new Date(Date.UTC(y, (m ?? 1) - 1, d ?? 1));
@@ -200,6 +219,12 @@ function AmplyFooter() {
       >
         <Image src="/amply-logo.png" alt="Amply Systems" width={45} height={16} className="h-4 w-auto" />
       </span>
+      <a
+        href="/admin"
+        className="ml-3 min-h-[44px] inline-flex items-center px-2 text-xs text-neutral-400 underline-offset-2 hover:underline dark:text-neutral-600"
+      >
+        Admin
+      </a>
     </footer>
   );
 }
@@ -275,6 +300,7 @@ function AttractView({ startIndex, onExit }: { startIndex: number; onExit: () =>
 
 export default function KioskClient() {
   const [view, setView] = useState<View>('grid');
+  const clock = useClock();
   const [roster, setRoster] = useState<RosterResponse | null>(null);
   const [rosterError, setRosterError] = useState(false);
   const [query, setQuery] = useState('');
@@ -607,7 +633,7 @@ export default function KioskClient() {
           </div>
           {roster && (
             <div className="rounded-full bg-white px-3.5 py-1.5 text-sm font-medium text-neutral-600 shadow-sm dark:bg-neutral-900 dark:text-neutral-300">
-              {formatMeetingDate(roster.meetingDate)}
+              {formatMeetingDate(roster.meetingDate)} · {clock}
             </div>
           )}
         </header>
