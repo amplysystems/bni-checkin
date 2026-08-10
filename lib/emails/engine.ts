@@ -10,7 +10,7 @@
 // This module owns ALL email_messages state/timestamp writes; lib/emails/
 // send.ts is deliberately DB-free and only performs the Resend fetch.
 
-import { and, eq, lt, notInArray } from 'drizzle-orm';
+import { and, eq, isNull, lt, notInArray, or } from 'drizzle-orm';
 import { emailMessages, meetings, settings as settingsTable, type EmailMessage } from '@/db/schema';
 import type { Db } from '@/lib/db';
 import { chicagoTimeToUtc } from '@/lib/time';
@@ -33,8 +33,12 @@ export class EngineError extends Error {
 
 type SettingsRow = typeof settingsTable.$inferSelect;
 
+// Spec §5: visitor thank-you 5:00 PM CT, leadership report 5:30 PM CT.
+// Kept in sync with db/schema.ts's column defaults by hand (this constant
+// only matters when the row is missing entirely, e.g. a bare test DB) —
+// see migration 0003 for the incident where these two drifted apart.
 const SETTINGS_DEFAULTS: SettingsRow = {
-  id: 1, approveMode: true, reportSendTime: '18:00', thankyouSendTime: '17:30',
+  id: 1, approveMode: true, reportSendTime: '17:30', thankyouSendTime: '17:00',
   reportRecipients: [], openSeats: [],
 };
 
@@ -210,14 +214,17 @@ function toSendable(message: EmailMessage): SendableMessage {
 }
 
 // Up to MAX_ATTEMPTS immediate attempts against send.ts before giving up.
-// No artificial delay between attempts — real-world backoff ACROSS cron
-// ticks is Task 4's concern (a message left 'failed' here is exactly what
-// gives a future tick, or an admin's manual Send now, something to retry);
-// this loop only covers "the transient blip resolved within the same
-// call", which is what spec §16's "retry after transient failure doesn't
-// duplicate" is checking for. Every outcome is written exactly once, after
-// the loop — a mid-loop failure never touches the DB, so a
-// fails-twice-then-succeeds run leaves no failed rows behind at all.
+// No artificial delay between attempts. CORRECTION (Task 4 review): a
+// message left 'failed' here is NOT automatically retried by any future
+// cron tick — Task 4's lib/emails/tick.ts / executeDue only ever claims
+// messages in state 'scheduled', never 'failed'. The only paths back to
+// life for a failed row are an admin's manual Send now (Task 5's UI,
+// sendNow() below) or a fresh send_key (a new meeting). This loop only
+// covers "the transient blip resolved within the same call", which is
+// what spec §16's "retry after transient failure doesn't duplicate" is
+// checking for. Every outcome is written exactly once, after the loop —
+// a mid-loop failure never touches the DB, so a fails-twice-then-succeeds
+// run leaves no failed rows behind at all.
 async function sendWithRetry(db: Db, id: string, alreadyClaimed?: EmailMessage): Promise<EmailMessage | null> {
   const claimed = alreadyClaimed ?? await claimFromAnyPreSendState(db, id);
   if (!claimed) return null;
@@ -254,22 +261,31 @@ const STALE_SENDING_MINUTES = 10;
 // liability without a reaper: nothing would ever pick the row back up.
 // Reclaiming it into 'failed' (not straight back to 'scheduled' — a
 // send attempt may have actually reached Resend before the crash;
-// 'failed' surfaces it for a deliberate manual retry via sendNow rather
-// than silently re-attempting) reopens it to every existing retry path.
-// error='stale-reclaimed' distinguishes this from a real Resend failure
-// in the dashboard/logs.
+// 'failed' surfaces it for a deliberate manual retry via sendNow, the
+// ONLY retry path a reclaimed row has — see the CORRECTION comment on
+// sendWithRetry above: no cron tick auto-retries a 'failed' row) rather
+// than silently re-attempting. error='stale-reclaimed' distinguishes
+// this from a real Resend failure in the dashboard/logs.
 //
-// The WHERE clause (state='sending' AND sendingAt older than the cutoff)
-// IS the state-guard the task calls for: two overlapping reaper calls (or
-// a reaper racing a send that legitimately finishes mid-sweep) can each
-// only reclaim a row that is STILL 'sending' with a STILL-stale sendingAt
-// at the moment their own UPDATE runs — a row that already resolved to
-// sent/failed between read and write matches zero rows for the loser.
+// The WHERE clause (state='sending' AND (sendingAt older than the cutoff
+// OR sendingAt IS NULL)) IS the state-guard the task calls for: two
+// overlapping reaper calls (or a reaper racing a send that legitimately
+// finishes mid-sweep) can each only reclaim a row that is STILL 'sending'
+// with a STILL-stale/null sendingAt at the moment their own UPDATE runs —
+// a row that already resolved to sent/failed between read and write
+// matches zero rows for the loser. The `OR isNull(sendingAt)` half (M1
+// review) exists for rows that entered 'sending' before migration 0002
+// added the column — those have no age to compare against at all, so
+// "unknown age" is treated the same as "definitely stale" rather than
+// being silently unreachable forever.
 export async function reapStaleSending(db: Db, now: Date = new Date()): Promise<EmailMessage[]> {
   const staleBefore = new Date(now.getTime() - STALE_SENDING_MINUTES * 60_000);
   return db.update(emailMessages)
     .set({ state: 'failed', error: 'stale-reclaimed' })
-    .where(and(eq(emailMessages.state, 'sending'), lt(emailMessages.sendingAt, staleBefore)))
+    .where(and(
+      eq(emailMessages.state, 'sending'),
+      or(lt(emailMessages.sendingAt, staleBefore), isNull(emailMessages.sendingAt)),
+    ))
     .returning();
 }
 

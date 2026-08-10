@@ -4,6 +4,7 @@ import { createTestDb, type TestDb } from './helpers/db';
 import { seed } from '../scripts/seed';
 import { emailMessages, meetings, settings } from '@/db/schema';
 import { setDb } from '@/lib/db';
+import { chicagoWallClock } from '@/lib/time';
 import { getOrCreateMeetingFor } from '@/lib/meetings';
 import { registerVisitor } from '@/lib/visitors';
 import { reapStaleSending } from '@/lib/emails/engine';
@@ -15,7 +16,12 @@ import { POST as tickPOST } from '@/app/api/cron/email-tick/route';
 const NOW = new Date('2026-08-12T19:00:00Z'); // 14:00 CT — meeting check-in time
 const BEFORE_GATE = new Date('2026-08-12T21:30:00Z'); // 16:30 CT — before the 16:45 compile gate
 const AT_GATE = new Date('2026-08-12T21:45:00Z'); // 16:45 CT exactly — inclusive boundary
-const AFTER_GATE_BEFORE_SEND = new Date('2026-08-12T22:00:00Z'); // 17:00 CT — gate passed, nothing due yet
+// 16:50 CT — gate passed (16:45), but unambiguously before BOTH spec-default
+// send times (thankyou 17:00, report 17:30) with a clean 10-minute margin —
+// avoids landing exactly on 17:00 (see migration 0003) and leaving this
+// constant's "nothing due yet" premise dependent on approveMode happening
+// to still be ON in whatever test reuses it.
+const AFTER_GATE_BEFORE_SEND = new Date('2026-08-12T21:50:00Z');
 const AFTER_ALL_SEND = new Date('2026-08-12T23:00:00Z'); // 18:00 CT — both default send times passed
 
 function mockFetchOk(id = 'resend-1') {
@@ -99,6 +105,56 @@ describe('lib/emails/tick: runEmailTick', () => {
       const result = await runEmailTick(db, new Date('2026-08-26T22:00:00Z'));
       expect(result.meetingId).toBeNull();
       expect(result.draftsCreated).toBe(0);
+    });
+  });
+
+  // Winter-window review carry-in: email-cron-late.mts's Thu 00:00-01:45 UTC
+  // schedule exists because a fixed-UTC cron window is narrower (and an
+  // hour earlier) in CST than CDT — see that file's header and
+  // email-cron.mts's for the full incident writeup. These tests prove the
+  // mechanism the fix depends on: a "Thursday UTC" instant in winter still
+  // resolves to the Wednesday meeting Chicago-side, and a message due at
+  // the spec-default report time (17:30 CT) that the primary window would
+  // have missed in winter is still picked up.
+  describe('winter window coverage (email-cron-late.mts territory)', () => {
+    // 2026-01-14 is a real Wednesday; 2026-01-15T00:30:00Z is 00:30 UTC
+    // Thursday — squarely inside email-cron-late.mts's schedule — which in
+    // CST (winter, UTC-6; DST doesn't start until 2026-03-08) is 18:30 CT
+    // Wednesday evening, not Thursday at all.
+    const WINTER_WEDNESDAY_CHECKIN = new Date('2026-01-14T20:00:00Z'); // 14:00 CST Wed
+    const WINTER_LATE_TICK_UTC_THURSDAY = new Date('2026-01-15T00:30:00Z'); // 18:30 CST Wed
+
+    it('a Thu 00:30 UTC winter instant resolves to the Wednesday Chicago date', () => {
+      expect(chicagoWallClock(WINTER_LATE_TICK_UTC_THURSDAY).dateStr).toBe('2026-01-14');
+      expect(chicagoWallClock(WINTER_LATE_TICK_UTC_THURSDAY).weekday).toBe(3); // 0=Sun..6=Sat, 3=Wed
+    });
+
+    it('resolves the Wednesday meeting and fires an executeDue send for a 17:30-CT-due report, from a Thu-UTC winter instant', async () => {
+      const winterDb = await createTestDb();
+      await seed(winterDb);
+      await registerVisitor(winterDb, {
+        fullName: 'Wanda Winter', industry: 'HVAC', company: null,
+        email: 'wanda@example.com', phone: null, clientOpId: 'winter-1', now: WINTER_WEDNESDAY_CHECKIN,
+      });
+      const winterMeeting = await getOrCreateMeetingFor(winterDb, WINTER_WEDNESDAY_CHECKIN);
+      // approveMode off so drafts land 'scheduled' and are actually
+      // send-eligible once due — isolates "does the late window catch a
+      // due send" from the separate approval-notice mechanism.
+      await winterDb.update(settings).set({ approveMode: false }).where(eq(settings.id, 1));
+
+      const fetchMock = mockFetchOk('winter-report-1');
+      vi.stubGlobal('fetch', fetchMock);
+
+      const result = await runEmailTick(winterDb, WINTER_LATE_TICK_UTC_THURSDAY);
+      expect(result.meetingId).toBe(winterMeeting.id); // resolved the Wednesday meeting, not "no meeting today"
+      expect(result.draftsCreated).toBe(2);
+      // Both spec-default send times (thankyou 17:00, report 17:30 CT) are
+      // before 18:30 CT — both due in this single tick.
+      expect(result.sentCount).toBe(2);
+
+      const rows = await winterDb.select().from(emailMessages).where(eq(emailMessages.meetingId, winterMeeting.id));
+      expect(rows).toHaveLength(2);
+      expect(rows.every((r) => r.state === 'sent')).toBe(true);
     });
   });
 
@@ -203,6 +259,21 @@ describe('lib/emails/engine: reapStaleSending', () => {
     const reclaimed = await reapStaleSending(db, now);
     expect(reclaimed).toHaveLength(1);
     expect(reclaimed[0].id).toBe(stale.id);
+    expect(reclaimed[0].state).toBe('failed');
+    expect(reclaimed[0].error).toBe('stale-reclaimed');
+  });
+
+  it('reclaims a "sending" row with a NULL sendingAt (M1: pre-migration-0002 rows with no age to compare)', async () => {
+    const now = new Date('2026-08-12T22:00:00Z');
+    const [nullSendingAt] = await db.insert(emailMessages).values({
+      sendKey: 'legacy-sending-no-timestamp', type: 'leadership_report', meetingId,
+      recipients: ['x@example.com'], subject: 'x', state: 'sending', // sendingAt omitted -> NULL
+    }).returning();
+    expect(nullSendingAt.sendingAt).toBeNull();
+
+    const reclaimed = await reapStaleSending(db, now);
+    expect(reclaimed).toHaveLength(1);
+    expect(reclaimed[0].id).toBe(nullSendingAt.id);
     expect(reclaimed[0].state).toBe('failed');
     expect(reclaimed[0].error).toBe('stale-reclaimed');
   });

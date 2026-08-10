@@ -1,11 +1,33 @@
-// Weekly logical export (spec §12, backup/DR) — a full JSON dump of every
-// application table, emailed to the owner as an attachment via lib/emails/
-// send.ts's single choke point, so SAFE_MODE's redirect-and-prefix
-// discipline still runs on this send even though the recipient is already
-// the owner (see send.ts's header comment for why nothing bypasses it).
-// Triggered weekly by netlify/functions/weekly-export.mts via
-// app/api/cron/weekly-export/route.ts, same CRON_SECRET guard as the email
-// tick.
+// Weekly logical export (spec §12, backup/DR) — a JSON dump of the
+// chapter's OPERATIONAL data (roster, attendance, membership/role history,
+// email send-state, settings), emailed to the owner as an attachment via
+// lib/emails/send.ts's single choke point, so SAFE_MODE's
+// redirect-and-prefix discipline still runs on this send even though the
+// recipient is already the owner (see send.ts's header comment for why
+// nothing bypasses it). Triggered weekly by netlify/functions/
+// weekly-export.mts via app/api/cron/weekly-export/route.ts, same
+// CRON_SECRET guard as the email tick.
+//
+// CORRECTION (review): this is NOT "every application table" — it's the
+// seven listed in dumpTables() below (people, meetings, attendance,
+// memberships, personRoles, emailMessages, settings). Explicitly excluded,
+// by name, and why:
+//   - rate_limits: ephemeral kiosk rate-limiter state (lib/rate-limit.ts).
+//     Ambient — it self-heals every window rollover and carries no
+//     information worth restoring; including it would just be noise in a
+//     DR-focused export.
+//   - email_events: Resend webhook delivery-status events (spec §7). Not
+//     yet populated by anything — Task 7 builds the webhook handler that
+//     writes to this table. REVISIT once Task 7 lands: delivery history is
+//     genuinely operational data (bounce tracking) and probably belongs in
+//     this export once it exists.
+//   - users / accounts / sessions / verification_tokens: Auth.js identity
+//     and session state. Out of scope for chapter-data DR on two
+//     independent grounds — (1) it's re-derivable (magic-link sign-in
+//     needs no restore, just a fresh login) rather than being source-of-
+//     truth chapter data, and (2) sessions/verification_tokens hold
+//     bearer-style tokens that have no business sitting in a JSON
+//     attachment in an inbox.
 //
 // DECISION (documented per the task): storage is email-attachment-only.
 // Spec §12 also names Netlify Blobs as a second storage leg; this task

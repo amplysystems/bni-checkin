@@ -128,8 +128,12 @@ export const emailEvents = pgTable('email_events', {
 export const settings = pgTable('settings', {
   id: integer('id').primaryKey(),
   approveMode: boolean('approve_mode').notNull().default(true),
-  reportSendTime: text('report_send_time').notNull().default('18:00'),
-  thankyouSendTime: text('thankyou_send_time').notNull().default('17:30'),
+  // Spec §5 defaults: visitor thank-you 5:00 PM CT, leadership report 5:30
+  // PM CT. Migration 0003 corrects these from the original (wrong) schema
+  // defaults ('18:00'/'17:30') — see that migration's header for the
+  // winter-DST bug those wrong values caused.
+  reportSendTime: text('report_send_time').notNull().default('17:30'),
+  thankyouSendTime: text('thankyou_send_time').notNull().default('17:00'),
   reportRecipients: jsonb('report_recipients').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
   openSeats: jsonb('open_seats').$type<string[]>().notNull().default(sql`'[]'::jsonb`),
 }, (t) => [

@@ -35,9 +35,15 @@ import {
 } from './engine';
 
 // 16:45 CT — "compile drafts ~4:45 PM" per the plan (meetings run 3:30-4:30
-// PM CT; the earliest default send time, thankyouSendTime, is 17:30 CT —
-// this leaves 45 minutes of drafts sitting compiled/awaiting-approval
-// before the earliest possible send).
+// PM CT). CORRECTED (was wrongly documented as a 45-minute buffer, back
+// when the schema's thankyouSendTime default was incorrectly 17:30 — see
+// migration 0003): the earliest default send time, thankyouSendTime, is
+// actually 17:00 CT (spec §5), so this leaves a 15-minute buffer of drafts
+// sitting compiled/awaiting-approval before the earliest possible send —
+// exactly matching the plan's own "compile ~4:45 PM, thank-you 5:00 PM"
+// framing. 15 minutes is also exactly one cron tick, so the very next tick
+// after compilation is already positioned to catch that send the instant
+// it comes due.
 const DRAFT_COMPILE_HOUR = 16;
 const DRAFT_COMPILE_MINUTE = 45;
 

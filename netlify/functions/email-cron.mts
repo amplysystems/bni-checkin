@@ -1,8 +1,25 @@
 // Netlify Scheduled Function — Wednesdays 21:00-23:45 UTC, every 15
-// minutes. That window spans 4:00-6:45 PM Chicago across BOTH DST offsets
-// (CDT UTC-5 in summer, CST UTC-6 in winter), per the plan; the actual
-// time-gating (>=16:45 CT before drafts compile) happens Chicago-side in
-// lib/emails/tick.ts, not here.
+// minutes. CORRECTION (winter-window review): this window is NOT the same
+// width in Chicago local time across DST offsets — it's a fixed UTC range,
+// so it covers 16:00-18:45 CDT in summer (UTC-5) but only 15:00-17:45 CST
+// in winter (UTC-6), an hour earlier and an hour narrower. That's exactly
+// what caused the original bug: the (wrong, pre-migration-0003) leadership
+// report default of 18:00 CT fell OUTSIDE this window entirely in winter
+// (18:00 CST = 00:00 UTC Thursday), so a winter report would sit
+// 'scheduled' for a full 7 days until the following Wednesday's window
+// reopened it. Migration 0003 fixed the defaults to spec §5's 17:00/17:30,
+// which DO fit inside this window's winter tail (17:45 CST is this
+// window's last tick) — but with only a 15-minute margin, any
+// admin-customized send time later than that would repeat the same
+// failure mode. email-cron-late.mts's Thu 00:00-01:45 UTC window is
+// deliberately contiguous with this one in BOTH offsets (see that file's
+// header) as the actual fix for that residual risk, not just a "just in
+// case" — this window alone still isn't reliably enough on its own once
+// admin-configurable times are in play. The time-gating that decides
+// whether there's actually anything to do (>=16:45 CT before drafts
+// compile) happens Chicago-side in lib/emails/tick.ts, not here — both
+// this function and email-cron-late.mts hit the exact same idempotent
+// tick route, so firing on a tick with nothing due is a no-op.
 //
 // This function is deliberately a thin trigger with no business logic of
 // its own: Netlify Functions run in a separate deployment target from the

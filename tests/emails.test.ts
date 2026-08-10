@@ -11,11 +11,11 @@ import {
 
 // Wednesday 2026-08-12, 14:00 CT (well before the 15:30 meeting start and
 // well before either default send time). Default settings (from
-// scripts/seed.ts's column defaults): approveMode=true,
-// reportSendTime='18:00' CT, thankyouSendTime='17:30' CT.
+// scripts/seed.ts's column defaults, spec §5 as of migration 0003):
+// approveMode=true, reportSendTime='17:30' CT, thankyouSendTime='17:00' CT.
 const NOW = new Date('2026-08-12T19:00:00Z');
-const BEFORE_THANKYOU_TIME = new Date('2026-08-12T21:00:00Z'); // 16:00 CT — before 17:30 CT
-const AFTER_THANKYOU_TIME = new Date('2026-08-12T23:00:00Z'); // 18:00 CT — after 17:30 CT
+const BEFORE_THANKYOU_TIME = new Date('2026-08-12T21:00:00Z'); // 16:00 CT — before 17:00 CT
+const AFTER_THANKYOU_TIME = new Date('2026-08-12T23:00:00Z'); // 18:00 CT — after 17:00 CT
 
 function mockFetchOk(id = 'resend-1') {
   return vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id }), text: async () => '' });
@@ -220,9 +220,9 @@ describe('lib/emails/engine', () => {
       vi.stubGlobal('fetch', fetchMock);
 
       const sentNotDue = await executeDue(db, BEFORE_THANKYOU_TIME);
-      expect(sentNotDue).toHaveLength(0); // neither send time (17:30, 18:00) has passed yet at 16:00 CT
+      expect(sentNotDue).toHaveLength(0); // neither send time (17:00, 17:30) has passed yet at 16:00 CT
 
-      const sentDue = await executeDue(db, AFTER_THANKYOU_TIME); // 18:00 CT: thank-you (17:30) due, report (18:00) due
+      const sentDue = await executeDue(db, AFTER_THANKYOU_TIME); // 18:00 CT: thank-you (17:00) due, report (17:30) due
       expect(sentDue.length).toBe(2);
       expect(sentDue.every((m) => m.state === 'sent')).toBe(true);
     });
