@@ -18,7 +18,7 @@ import { generateMeetingIcs } from './ics';
 import { OWNER_EMAIL } from './constants';
 
 export type SendableMessage = {
-  type: 'leadership_report' | 'visitor_thankyou' | 'approval_notice' | 'weekly_export';
+  type: 'leadership_report' | 'visitor_thankyou' | 'approval_notice' | 'weekly_export' | 'rsvp_notice';
   sendKey: string;
   recipients: string[];
   subject: string;

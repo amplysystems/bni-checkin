@@ -15,9 +15,10 @@ import { emailMessages, meetings, settings as settingsTable, type EmailMessage }
 import type { Db } from '@/lib/db';
 import { chicagoTimeToUtc } from '@/lib/time';
 import { approvalNoticeHtml, approvalNoticeSubject } from '@/emails/approval-notice';
+import { rsvpNoticeHtml, rsvpNoticeSubject, type RsvpNoticePurpose } from '@/emails/rsvp-notice';
 import { compileForMeeting, formatMeetingDateLabel } from './compile';
 import { OWNER_EMAIL, siteUrl } from './constants';
-import { approvalNoticeSendKey } from './send-keys';
+import { approvalNoticeSendKey, rsvpNoticeSendKey } from './send-keys';
 import { sendEmailMessage, type SendableMessage } from './send';
 
 export type EmailState = EmailMessage['state'];
@@ -337,5 +338,32 @@ export async function ensureApprovalNotice(db: Db, meetingId: string): Promise<E
   }).onConflictDoNothing({ target: emailMessages.sendKey }).returning();
 
   if (!inserted) return null; // already created by an earlier tick — never re-fire
+  return sendWithRetry(db, inserted.id);
+}
+
+// Phase 2 Task 6: the owner notification fired the first time a given RSVP/
+// interest token's /rsvp/[token] link is opened — "{fullName} plans to
+// visit Wednesday" or "{fullName} is interested in membership" depending on
+// the token's purpose. Called from lib/rsvp-visit.ts, which is itself only
+// invoked once markRsvpTokenUsed's own atomically-guarded column update
+// (lib/emails/rsvp-tokens.ts) confirms THIS call is the one that won first
+// use — send_key uniqueness here is a second, independent guard on top of
+// that, not the only one (see rsvpNoticeSendKey's own comment). No
+// meetingId: like weekly_export, a token outlives any single meeting's
+// compile, so there's nothing meeting-scoped to attach this row to.
+export async function ensureRsvpNotice(
+  db: Db,
+  { token, purpose, personFullName }: { token: string; purpose: RsvpNoticePurpose; personFullName: string },
+): Promise<EmailMessage | null> {
+  const [inserted] = await db.insert(emailMessages).values({
+    sendKey: rsvpNoticeSendKey(token),
+    type: 'rsvp_notice',
+    recipients: [OWNER_EMAIL],
+    subject: rsvpNoticeSubject(purpose, personFullName),
+    bodySnapshot: rsvpNoticeHtml({ purpose, personFullName, siteUrl: siteUrl() }),
+    state: 'draft',
+  }).onConflictDoNothing({ target: emailMessages.sendKey }).returning();
+
+  if (!inserted) return null; // already created — never re-fire for the same token
   return sendWithRetry(db, inserted.id);
 }

@@ -9,6 +9,16 @@
 // activeMemberCount (the road-to-25 figure) is threaded in from
 // lib/emails/compile.ts, which already computes it for the leadership
 // report, rather than this template re-deriving it.
+//
+// CTA STATUS (Task 6 VISION-DOC ADOPTION (1), still pending): the button
+// below is wired to a live per-visitor 'interest' token
+// (lib/emails/compile.ts) and the endpoint it points at DOES record
+// membership interest and notify Jason — the mechanics are live. Only the
+// button's TEXT is still the currently-approved RSVP-style copy ("I'm
+// coming Wednesday — hold the seat"); it stays that way until Jason signs
+// off on interest-specific wording, since a visitor with no visit 3 can't
+// actually RSVP for one. Swap only the string below when that copy lands —
+// no other change needed here or in compile.ts.
 
 import { MEETING_LINE, VENUE_LINE_1, VENUE_LINE_2 } from './visitor-thankyou';
 import { escapeHtml } from './escape-html';
@@ -18,7 +28,7 @@ export type VisitorConversionInput = {
   industry: string | null;
   activeMemberCount: number;
   siteUrl: string; // e.g. https://bni-checkin-wheeling.netlify.app — no trailing slash
-  rsvpUrl?: string; // Task 6 wires a real per-visitor RSVP token; '#' until then
+  rsvpUrl?: string; // Task 6: a real per-visitor 'interest' token, wired in lib/emails/compile.ts
 };
 
 const FONT = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";

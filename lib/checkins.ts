@@ -11,8 +11,16 @@ export type CheckInInput = {
 };
 
 export class CheckInError extends Error {
-  constructor(public code: 'person_not_found' | 'person_deactivated' | 'op_conflict') { super(code); }
+  constructor(public code: 'person_not_found' | 'person_deactivated' | 'op_conflict' | 'visit_limit') { super(code); }
 }
+
+// Phase 2 Task 6 two-visit kiosk rule: a visitor gets exactly two visits
+// (visitNumber 1 and 2) before the kiosk stops checking them in — the third
+// attempt (visitNumber-would-be >= 3) refuses with CheckInError('visit_limit')
+// UNLESS the admin has armed a one-time override (people.allow_extra_visit).
+// Never applies to kind='member'/'leadership' (checked at the call site
+// below, before this constant is ever consulted).
+const VISITOR_VISIT_LIMIT = 2;
 
 async function resolveKind(db: Db, personId: string): Promise<'member' | 'leadership' | 'visitor'> {
   const roles = await db.select().from(personRoles).where(eq(personRoles.personId, personId));
@@ -75,6 +83,22 @@ export async function checkIn(db: Db, input: CheckInInput) {
       isNull(attendance.voidedAt),
     ));
     visitNumber = Number(prior.n) + 1;
+
+    if (visitNumber > VISITOR_VISIT_LIMIT) {
+      if (!person.allowExtraVisit) throw new CheckInError('visit_limit');
+      // Consume the override — a single guarded UPDATE (WHERE
+      // allow_extra_visit = true), same pattern as every other state-scoped
+      // transition in this codebase (lib/emails/engine.ts's claim guards,
+      // rsvp_tokens' markRsvpTokenUsed). Authorizes exactly ONE extra visit:
+      // if two concurrent check-in attempts both raced here, only one wins
+      // this UPDATE and proceeds; the loser sees allow_extra_visit already
+      // false and refuses normally rather than both slipping through.
+      const [consumed] = await db.update(people)
+        .set({ allowExtraVisit: false })
+        .where(and(eq(people.id, input.personId), eq(people.allowExtraVisit, true)))
+        .returning({ id: people.id });
+      if (!consumed) throw new CheckInError('visit_limit');
+    }
   }
 
   try {
@@ -115,6 +139,21 @@ export async function voidCheckIn(
     .where(and(...conditions))
     .returning();
   return row ?? null;
+}
+
+// Admin roster's quiet "Allow another visit" action (app/admin/admin-
+// client.tsx) — arms the one-time override checkIn() consumes above. Not
+// scoped to "must currently be a visitor at the limit": an admin can call
+// this on anyone (the roster UI only ever offers the button for a visitor
+// with >=2 recorded visits, but the domain function itself doesn't need to
+// re-derive and enforce that same UI-level gating — setting the flag on
+// someone who never hits the limit is simply inert).
+export async function grantExtraVisit(db: Db, personId: string): Promise<boolean> {
+  const [row] = await db.update(people)
+    .set({ allowExtraVisit: true })
+    .where(eq(people.id, personId))
+    .returning({ id: people.id });
+  return row !== undefined;
 }
 
 export async function kioskRoster(db: Db, now: Date) {

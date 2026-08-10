@@ -6,6 +6,11 @@ import { checkIn, isUniqueViolation, CheckInError } from '@/lib/checkins';
 export type VisitorInput = {
   fullName: string; industry: string | null; company: string | null;
   email: string; phone: string | null; clientOpId: string; now?: Date;
+  // Phase 2 Task 6 "Who invited you?" kiosk field — an active member's
+  // fullName or one of the fixed lib/visitor-sources.ts options, snapshotted
+  // as free text same as every other visitor-supplied field. Optional/null
+  // for a visitor who skips the (optional) select.
+  invitedBy?: string | null;
 };
 
 const publicFields = {
@@ -82,6 +87,7 @@ export async function registerVisitor(db: Db, input: VisitorInput) {
       company: trimOrNull(input.company),
       email: input.email.trim(),
       phone: trimOrNull(input.phone),
+      invitedBy: trimOrNull(input.invitedBy ?? null),
     }).returning();
     orphan = person;
     await db.insert(memberships).values({ personId: person.id, status: 'visitor' });

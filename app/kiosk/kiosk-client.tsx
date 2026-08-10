@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import Image from 'next/image';
 import { Button } from '@/components/ui/button';
+import { INVITED_BY_OTHER_OPTIONS } from '@/lib/visitor-sources';
 
 // ---- Types (mirrored from the kiosk API route contracts) ----------------
 
@@ -47,9 +48,15 @@ type VisitorApiResponse =
 
 type ReturningApiResponse = { results: SuggestionPerson[] };
 
-type View = 'grid' | 'splash' | 'visitorForm' | 'returningSearch' | 'attract';
+type View = 'grid' | 'splash' | 'visitorForm' | 'returningSearch' | 'attract' | 'visitLimit';
 
 type SplashInfo = { fullName: string; attendanceId: string; checkedInAt: string };
+
+// Phase 2 Task 6 two-visit kiosk rule — the info the full-screen
+// VisitLimitView below needs. Just a first name (mirrors the RSVP page's
+// own "no full name beyond what's needed" instinct, even though this is an
+// internal kiosk screen, not public).
+type VisitLimitInfo = { firstName: string };
 
 type VisitorFormState = {
   fullName: string;
@@ -57,10 +64,13 @@ type VisitorFormState = {
   company: string;
   email: string;
   phone: string;
+  // Phase 2 Task 6 "Who invited you?" — an active member's fullName, one of
+  // INVITED_BY_OTHER_OPTIONS, or '' (skipped; optional field).
+  invitedBy: string;
 };
 
 const emptyVisitorForm: VisitorFormState = {
-  fullName: '', industry: '', company: '', email: '', phone: '',
+  fullName: '', industry: '', company: '', email: '', phone: '', invitedBy: '',
 };
 
 const GENERIC_ERROR = "Something went wrong — try again.";
@@ -199,14 +209,21 @@ function matchesQuery(m: Member, q: string): boolean {
 async function postJson<T>(
   url: string,
   body: unknown,
-): Promise<{ ok: true; data: T } | { ok: false; status: number }> {
+): Promise<{ ok: true; data: T } | { ok: false; status: number; error?: string }> {
   try {
     const res = await fetch(url, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-    if (!res.ok) return { ok: false, status: res.status };
+    if (!res.ok) {
+      // Best-effort: a non-JSON or empty error body just leaves `error`
+      // undefined, same as a network failure below — callers that care
+      // about a specific code (Phase 2 Task 6's 'visit_limit') already
+      // fall back to the generic toast when it's missing.
+      const errBody = (await res.json().catch(() => null)) as { error?: string } | null;
+      return { ok: false, status: res.status, error: errBody?.error };
+    }
     const data = (await res.json()) as T;
     return { ok: true, data };
   } catch {
@@ -621,6 +638,8 @@ export default function KioskClient() {
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [splash, setSplash] = useState<SplashInfo | null>(null);
   const [undoing, setUndoing] = useState(false);
+  // Phase 2 Task 6 two-visit kiosk rule full-screen state.
+  const [visitLimitInfo, setVisitLimitInfo] = useState<VisitLimitInfo | null>(null);
 
   // The day's ad for the splash backdrop — computed once per mount (a kiosk
   // session spans a single meeting, not multiple days) rather than on every
@@ -769,6 +788,7 @@ export default function KioskClient() {
     visitorOpIdRef.current = null;
     setReturningQuery('');
     setReturningResults([]);
+    setVisitLimitInfo(null);
   }, []);
 
   const goToSplash = useCallback((info: SplashInfo) => {
@@ -791,6 +811,17 @@ export default function KioskClient() {
     const result = await postJson<CheckinApiResponse>('/api/kiosk/checkin', { personId, clientOpId });
     setPendingId(null);
     if (!result.ok) {
+      // Two-visit kiosk rule (Phase 2 Task 6): a warm full-screen state, not
+      // a toast — this is never framed as an error to the visitor. Only
+      // ever reachable for a returning visitor (suggestion tap or returning
+      // search); members/leadership never resolve to CheckInError
+      // ('visit_limit') server-side (lib/checkins.ts's checkIn gates it on
+      // kind==='visitor'), so this branch is simply unreachable for them.
+      if (result.error === 'visit_limit') {
+        setVisitLimitInfo({ firstName: firstNameOf(fallbackName) });
+        setView('visitLimit');
+        return;
+      }
       showToast(result.status === 429 ? RATE_LIMITED_MESSAGE : GENERIC_ERROR);
       return;
     }
@@ -846,6 +877,7 @@ export default function KioskClient() {
       phone: visitorForm.phone.trim() === '' ? null : visitorForm.phone,
       clientOpId: opId,
       confirmedNew,
+      invitedBy: visitorForm.invitedBy.trim() === '' ? null : visitorForm.invitedBy,
     };
     const result = await postJson<VisitorApiResponse>('/api/kiosk/visitor', payload);
     setVisitorSubmitting(false);
@@ -937,6 +969,18 @@ export default function KioskClient() {
   const industryValid = visitorForm.industry.trim().length >= 2;
   const emailValid = isValidEmail(visitorForm.email);
 
+  // "Who invited you?" select options (Phase 2 Task 6): every active
+  // member's display name, alphabetized, then the fixed non-member
+  // options. Derived from the same roster the grid already fetched — no
+  // extra request. Members-only (not leadership) per the plan's literal
+  // "chapter members" wording.
+  const invitedByOptions = useMemo(() => {
+    const memberNames = (roster?.members ?? [])
+      .map((m) => m.displayName ?? m.fullName)
+      .sort((a, b) => a.localeCompare(b));
+    return [...memberNames, ...INVITED_BY_OTHER_OPTIONS];
+  }, [roster]);
+
   const returningQueryLongEnough = returningQuery.trim().length >= 2;
   const displayedReturningResults = returningQueryLongEnough ? returningResults : [];
   const returningIsLoading = returningLoading && returningQueryLongEnough;
@@ -1003,12 +1047,17 @@ export default function KioskClient() {
           nameValid={nameValid}
           industryValid={industryValid}
           emailValid={emailValid}
+          invitedByOptions={invitedByOptions}
           onSubmit={() => submitVisitor(false)}
           onPickSuggestion={(s) => performCheckIn(s.id, s.fullName)}
           onNotThatPerson={() => submitVisitor(true)}
           onFindReturning={openReturningSearch}
           onBack={resetToGrid}
         />
+      )}
+
+      {view === 'visitLimit' && visitLimitInfo && (
+        <VisitLimitView info={visitLimitInfo} onDone={resetToGrid} />
       )}
 
       {view === 'returningSearch' && (
@@ -1343,10 +1392,36 @@ function SplashView({
   );
 }
 
+// ---- Two-visit kiosk rule full-screen state --------------------------------
+//
+// Phase 2 Task 6: a returning visitor whose completed visit count is
+// already at the two-visit limit (and who has no admin-armed override) gets
+// this instead of a check-in — server-refused with CheckInError
+// ('visit_limit'), lib/checkins.ts. Deliberately warm, never scolding: no
+// "limit" language, no error styling, just a plain full-screen message and
+// a single Done button back to the grid. A member/organizer standing nearby
+// reads this exactly as easily as the visitor does.
+function VisitLimitView({ info, onDone }: { info: VisitLimitInfo; onDone: () => void }) {
+  return (
+    <main className="flex flex-1 flex-col items-center justify-center px-6 text-center">
+      <h1 className="font-display text-3xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50 sm:text-4xl">
+        Welcome back, {info.firstName}
+      </h1>
+      <p className="mt-4 max-w-md text-lg text-neutral-600 dark:text-neutral-300">
+        You&apos;ve completed your visitor meetings &mdash; please see a chapter host to continue.
+      </p>
+      <Button variant="primary" size="lg" onClick={onDone} className="mt-8 px-10">
+        Done
+      </Button>
+    </main>
+  );
+}
+
 // ---- Visitor form view ----------------------------------------------------
 
 function VisitorFormView({
   form, setForm, error, submitting, suggestions, pendingId, nameValid, industryValid, emailValid,
+  invitedByOptions,
   onSubmit, onPickSuggestion, onNotThatPerson, onFindReturning, onBack,
 }: {
   form: VisitorFormState;
@@ -1358,6 +1433,7 @@ function VisitorFormView({
   nameValid: boolean;
   industryValid: boolean;
   emailValid: boolean;
+  invitedByOptions: string[];
   onSubmit: () => void;
   onPickSuggestion: (s: SuggestionPerson) => void;
   onNotThatPerson: () => void;
@@ -1462,7 +1538,7 @@ function VisitorFormView({
                   className={VISITOR_INPUT_CLASS}
                 />
               </Field>
-              <Field label="Work email">
+              <Field label="Email">
                 <input
                   type="email"
                   required
@@ -1479,6 +1555,20 @@ function VisitorFormView({
                   onChange={(e) => setForm((f) => ({ ...f, phone: e.target.value }))}
                   className={VISITOR_INPUT_CLASS}
                 />
+              </Field>
+              {/* Phase 2 Task 6 — optional, no `required`: a visitor who
+                  skips it just leaves people.invitedBy null. */}
+              <Field label="Who invited you? (optional)">
+                <select
+                  value={form.invitedBy}
+                  onChange={(e) => setForm((f) => ({ ...f, invitedBy: e.target.value }))}
+                  className={VISITOR_INPUT_CLASS}
+                >
+                  <option value="">Select one</option>
+                  {invitedByOptions.map((name) => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
               </Field>
             </div>
 

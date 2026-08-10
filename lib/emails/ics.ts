@@ -45,7 +45,14 @@ function daysUntilWednesday(weekday: number): number {
 // than adding real elapsed time to `from` — this keeps "add N calendar
 // days" correct regardless of the caller's timezone or any DST transition
 // the span crosses, since it never touches a wall-clock hour at all.
-function addDaysToDateString(dateStr: string, days: number): string {
+//
+// Exported (Phase 2 Task 6): lib/emails/compile.ts uses this directly to
+// derive an RSVP token's targetDate as "this meeting's date + 7" — the
+// literal next Wednesday, deterministically, without re-deriving it from
+// wall-clock `now` the way nextWednesday() below does (compileForMeeting
+// already knows exactly which meeting it's compiling for; it shouldn't
+// need a second, time-of-call-dependent source of truth for the same fact).
+export function addDaysToDateString(dateStr: string, days: number): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   return new Date(Date.UTC(y, m - 1, d + days)).toISOString().slice(0, 10);
 }
@@ -78,7 +85,11 @@ function escapeIcsText(s: string): string {
     .replace(/\r\n|\r|\n/g, '\\n');
 }
 
-function addMinutesToHhmm(hhmm: string, minutes: number): string {
+// Exported: lib/emails/calendar-links.ts (Phase 2 Task 6) reuses this to
+// compute the meeting's end time for the Google/Outlook add-to-calendar
+// deeplinks, same MEETING_DURATION_MINUTES-after-start math as the ics
+// generator below — one definition of "how long is the meeting."
+export function addMinutesToHhmm(hhmm: string, minutes: number): string {
   const [h, m] = hhmm.split(':').map(Number);
   const total = h * 60 + m + minutes;
   const hh = Math.floor(total / 60) % 24;
@@ -86,7 +97,11 @@ function addMinutesToHhmm(hhmm: string, minutes: number): string {
   return `${String(hh).padStart(2, '0')}:${String(mm).padStart(2, '0')}`;
 }
 
-function utcTimeStamp(d: Date): string {
+// Exported: lib/emails/calendar-links.ts reuses this exact YYYYMMDDTHHMMSSZ
+// formatting for Google Calendar's `dates=` param, so the two UTC-instant
+// timestamps a recipient sees (the .ics DTSTART/DTEND and the Google
+// deeplink's dates) are always byte-identical for the same input Date.
+export function utcTimeStamp(d: Date): string {
   return d.toISOString().replace(/[-:]/g, '').replace(/\.\d{3}Z$/, 'Z');
 }
 

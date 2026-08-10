@@ -11,6 +11,9 @@ const Body = z.object({
   phone: z.string().trim().max(50).nullable().optional().default(null),
   clientOpId: z.string().min(8).max(128),
   confirmedNew: z.boolean().optional().default(false),
+  // Phase 2 Task 6 "Who invited you?" — optional, so omitting it (or
+  // sending '') is a normal, non-error submission.
+  invitedBy: z.string().trim().max(200).nullable().optional().default(null),
 });
 
 export async function POST(req: Request) {

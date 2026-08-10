@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { createTestDb, type TestDb } from './helpers/db';
 import { people, meetings, attendance, settings, memberships } from '@/db/schema';
-import { checkIn, voidCheckIn, kioskRoster, CheckInError } from '@/lib/checkins';
+import { checkIn, voidCheckIn, kioskRoster, grantExtraVisit, CheckInError } from '@/lib/checkins';
 import { getOrCreateMeetingFor } from '@/lib/meetings';
 import { seed } from '../scripts/seed';
 
@@ -245,5 +245,114 @@ describe('checkIn', () => {
     );
     expect(rightScope).not.toBeNull();
     expect(rightScope!.voidedAt).toBeTruthy();
+  });
+});
+
+// Phase 2 Task 6 two-visit kiosk rule.
+describe('checkIn — two-visit kiosk rule', () => {
+  let db: TestDb;
+  const WEEK1 = new Date('2026-08-12T19:00:00Z');
+  const WEEK2 = new Date(WEEK1.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const WEEK3 = new Date(WEEK1.getTime() + 14 * 24 * 60 * 60 * 1000);
+  const WEEK4 = new Date(WEEK1.getTime() + 21 * 24 * 60 * 60 * 1000);
+
+  beforeEach(async () => {
+    db = await createTestDb();
+    await seed(db);
+  });
+
+  async function newVisitor(name: string) {
+    const [p] = await db.insert(people).values({ fullName: name }).returning();
+    await db.insert(memberships).values({ personId: p.id, status: 'visitor' });
+    return p;
+  }
+
+  async function personByName(name: string) {
+    const [p] = await db.select().from(people).where(eq(people.fullName, name));
+    return p;
+  }
+
+  it('visit 1 and visit 2 check in normally', async () => {
+    const v = await newVisitor('Two Visit Val');
+    const first = await checkIn(db, { personId: v.id, clientOpId: 'tv-1', source: 'kiosk', now: WEEK1 });
+    expect(first.attendance.visitNumber).toBe(1);
+    const second = await checkIn(db, { personId: v.id, clientOpId: 'tv-2', source: 'kiosk', now: WEEK2 });
+    expect(second.attendance.visitNumber).toBe(2);
+  });
+
+  it('the 3rd attempt is refused with CheckInError(visit_limit) and records no attendance row', async () => {
+    const v = await newVisitor('Three Time Tina');
+    await checkIn(db, { personId: v.id, clientOpId: 'tt-1', source: 'kiosk', now: WEEK1 });
+    await checkIn(db, { personId: v.id, clientOpId: 'tt-2', source: 'kiosk', now: WEEK2 });
+
+    const err = await checkIn(
+      db, { personId: v.id, clientOpId: 'tt-3', source: 'kiosk', now: WEEK3 },
+    ).catch((e) => e);
+    expect(err).toBeInstanceOf(CheckInError);
+    expect((err as CheckInError).code).toBe('visit_limit');
+
+    const rows = await db.select().from(attendance).where(eq(attendance.personId, v.id));
+    expect(rows).toHaveLength(2); // only the two real visits — the refused 3rd attempt wrote nothing
+  });
+
+  it('admin override (grantExtraVisit) allows exactly one extra visit, then re-refuses', async () => {
+    const v = await newVisitor('Override Owen');
+    await checkIn(db, { personId: v.id, clientOpId: 'oo-1', source: 'kiosk', now: WEEK1 });
+    await checkIn(db, { personId: v.id, clientOpId: 'oo-2', source: 'kiosk', now: WEEK2 });
+
+    const blocked = await checkIn(
+      db, { personId: v.id, clientOpId: 'oo-3', source: 'kiosk', now: WEEK3 },
+    ).catch((e) => e);
+    expect((blocked as CheckInError).code).toBe('visit_limit');
+
+    const granted = await grantExtraVisit(db, v.id);
+    expect(granted).toBe(true);
+    let [person] = await db.select().from(people).where(eq(people.id, v.id));
+    expect(person.allowExtraVisit).toBe(true);
+
+    const third = await checkIn(db, { personId: v.id, clientOpId: 'oo-4', source: 'kiosk', now: WEEK3 });
+    expect(third.attendance.visitNumber).toBe(3);
+
+    // The override is consumed (single-use) — it was reset back to false.
+    [person] = await db.select().from(people).where(eq(people.id, v.id));
+    expect(person.allowExtraVisit).toBe(false);
+
+    // A 4th attempt, with no fresh override, is refused again.
+    const fourth = await checkIn(
+      db, { personId: v.id, clientOpId: 'oo-5', source: 'kiosk', now: WEEK4 },
+    ).catch((e) => e);
+    expect((fourth as CheckInError).code).toBe('visit_limit');
+  });
+
+  it('members and leadership are NEVER refused, no matter how many meetings they attend', async () => {
+    const jason = await personByName('Jason Barrios');
+    const carey = await personByName('Carey Rothbardt');
+    const weeks = [WEEK1, WEEK2, WEEK3, WEEK4];
+    for (let i = 0; i < weeks.length; i += 1) {
+      const m = await checkIn(db, { personId: jason.id, clientOpId: `member-week-${i}`, source: 'kiosk', now: weeks[i] });
+      expect(m.attendance.kind).toBe('member');
+      const l = await checkIn(db, { personId: carey.id, clientOpId: `leader-week-${i}`, source: 'kiosk', now: weeks[i] });
+      expect(l.attendance.kind).toBe('leadership');
+    }
+  });
+
+  it('a voided visit is excluded from the count toward the limit, same as visitNumber numbering', async () => {
+    const v = await newVisitor('Voided Vic');
+    const first = await checkIn(db, { personId: v.id, clientOpId: 'vv-1', source: 'kiosk', now: WEEK1 });
+    await voidCheckIn(db, { attendanceId: first.attendance.id, by: 'kiosk' });
+    // Voided week-1 visit doesn't count — this is still "visit 1".
+    const second = await checkIn(db, { personId: v.id, clientOpId: 'vv-2', source: 'kiosk', now: WEEK2 });
+    expect(second.attendance.visitNumber).toBe(1);
+    const third = await checkIn(db, { personId: v.id, clientOpId: 'vv-3', source: 'kiosk', now: WEEK3 });
+    expect(third.attendance.visitNumber).toBe(2);
+    const fourth = await checkIn(
+      db, { personId: v.id, clientOpId: 'vv-4', source: 'kiosk', now: WEEK4 },
+    ).catch((e) => e);
+    expect((fourth as CheckInError).code).toBe('visit_limit');
+  });
+
+  it('grantExtraVisit on an unknown personId returns false', async () => {
+    const granted = await grantExtraVisit(db, '00000000-0000-0000-0000-000000000000');
+    expect(granted).toBe(false);
   });
 });

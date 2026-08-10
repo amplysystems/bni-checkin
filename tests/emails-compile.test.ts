@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach } from 'vitest';
 import { eq } from 'drizzle-orm';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seed } from '../scripts/seed';
-import { people, memberships, meetings, attendance, settings } from '@/db/schema';
+import { people, memberships, meetings, attendance, settings, rsvpTokens } from '@/db/schema';
 import { checkIn, voidCheckIn } from '@/lib/checkins';
 import { getOrCreateMeetingFor } from '@/lib/meetings';
 import { registerVisitor } from '@/lib/visitors';
@@ -249,5 +249,98 @@ describe('compileForMeeting', () => {
     const line = report.text.split('\n').find((l) => l.startsWith('Last 6 weeks:'))!;
     // Oldest -> newest: wk1=1, wk2=2, wk3=1 (voided excluded), target=1.
     expect(line).toBe('Last 6 weeks: 1 · 2 · 1 · 1');
+  });
+
+  // Phase 2 Task 6: RSVP/interest token wiring.
+  describe('RSVP token wiring', () => {
+    it('v1 thank-you CTA links to a real /rsvp/{token} page for the NEXT meeting — no mailto', async () => {
+      const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
+      await registerVisitor(db, {
+        fullName: 'First Timer', industry: 'Roofing', company: null,
+        email: 'first@example.com', phone: null, clientOpId: 'v-rsvp-1', now: TARGET_NOW,
+      });
+
+      const { drafts } = await compileForMeeting(db, meeting.id);
+      const draft = drafts.find((d): d is VisitorThankyouDraft => d.type === 'visitor_thankyou')!;
+      expect(draft.html).not.toContain('mailto:');
+
+      const [token] = await db.select().from(rsvpTokens).where(eq(rsvpTokens.personId, draft.personId));
+      expect(token.purpose).toBe('rsvp');
+      // TARGET_NOW's meeting is 2026-08-12 (Wednesday); next meeting = +7 days.
+      expect(token.targetDate).toBe('2026-08-19');
+      expect(draft.html).toContain(`/rsvp/${token.token}`);
+    });
+
+    it('v2 conversion CTA links to a real interest-purpose token, distinct from an rsvp token', async () => {
+      const priorWeek = new Date('2026-08-05T19:00:00Z');
+      const { person } = await registerVisitor(db, {
+        fullName: 'Repeat Visitor', industry: 'HVAC', company: null,
+        email: 'repeat-rsvp@example.com', phone: null, clientOpId: 'v-rsvp-2a', now: priorWeek,
+      });
+      const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
+      await checkIn(db, { personId: person!.id, clientOpId: 'v-rsvp-2b', source: 'kiosk', now: TARGET_NOW });
+
+      const { drafts } = await compileForMeeting(db, meeting.id);
+      const draft = drafts.find((d): d is VisitorThankyouDraft => d.type === 'visitor_thankyou')!;
+      expect(draft.isConversion).toBe(true);
+
+      const tokenRows = await db.select().from(rsvpTokens).where(eq(rsvpTokens.personId, person!.id));
+      expect(tokenRows).toHaveLength(1);
+      expect(tokenRows[0].purpose).toBe('interest');
+      expect(draft.html).toContain(`/rsvp/${tokenRows[0].token}`);
+      // Still the currently-approved RSVP-style CTA text (pending Jason's
+      // interest-specific copy) — only the href is interest-purpose.
+      expect(draft.html).toContain('I&rsquo;m coming Wednesday &mdash; hold the seat');
+    });
+
+    it('is idempotent: compiling the same meeting twice reuses the same token, not a fresh one', async () => {
+      const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
+      await registerVisitor(db, {
+        fullName: 'Repeat Preview', industry: 'Roofing', company: null,
+        email: 'repeat-preview@example.com', phone: null, clientOpId: 'v-rsvp-3', now: TARGET_NOW,
+      });
+
+      const first = await compileForMeeting(db, meeting.id);
+      const second = await compileForMeeting(db, meeting.id);
+      const draft1 = first.drafts.find((d): d is VisitorThankyouDraft => d.type === 'visitor_thankyou')!;
+      const draft2 = second.drafts.find((d): d is VisitorThankyouDraft => d.type === 'visitor_thankyou')!;
+      expect(draft1.html).toBe(draft2.html); // same embedded token both times
+
+      const tokenRows = await db.select().from(rsvpTokens).where(eq(rsvpTokens.personId, draft1.personId));
+      expect(tokenRows).toHaveLength(1); // never duplicated
+    });
+  });
+
+  describe('VISITOR SOURCES', () => {
+    it('groups visitors by invitedBy, falling back to "Not specified" for blanks', async () => {
+      const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
+      await registerVisitor(db, {
+        fullName: 'Sourced One', industry: 'Roofing', company: null,
+        email: 'sourced-one@example.com', phone: null, clientOpId: 'src-1', now: TARGET_NOW,
+        invitedBy: 'Jason Barrios',
+      });
+      await registerVisitor(db, {
+        fullName: 'Sourced Two', industry: 'HVAC', company: null,
+        email: 'sourced-two@example.com', phone: null, clientOpId: 'src-2', now: TARGET_NOW,
+        invitedBy: 'Jason Barrios',
+      });
+      await registerVisitor(db, {
+        fullName: 'Sourced Three', industry: 'Plumbing', company: null,
+        email: 'sourced-three@example.com', phone: null, clientOpId: 'src-3', now: TARGET_NOW,
+        invitedBy: 'Found us online',
+      });
+      await registerVisitor(db, {
+        fullName: 'No Source', industry: 'Legal', company: null,
+        email: 'no-source@example.com', phone: null, clientOpId: 'src-4', now: TARGET_NOW,
+      });
+
+      const { drafts } = await compileForMeeting(db, meeting.id);
+      const report = drafts.find((d) => d.type === 'leadership_report')!;
+      const line = report.text.split('\n').find((l) => l.startsWith('Visitor sources:'))!;
+      expect(line).toBe('Visitor sources: Jason Barrios (2) · Found us online (1) · Not specified (1)');
+      expect(report.html).toContain('Jason Barrios (2)');
+      expect(report.html).toContain('Found us online (1)');
+      expect(report.html).toContain('Not specified (1)');
+    });
   });
 });

@@ -22,6 +22,12 @@ export type LeadershipReportVisitor = {
 
 export type WeeklyCount = { meetingDate: string; count: number };
 
+// Phase 2 Task 6: this meeting's visitors grouped by their kiosk-form
+// "Who invited you?" answer (an active member's name, one of the fixed
+// non-member options, or "Not specified" — see lib/emails/compile.ts's
+// NOT_SPECIFIED_SOURCE), pre-sorted by count desc.
+export type VisitorSource = { source: string; count: number };
+
 export type LeadershipReportData = {
   meetingDateLabel: string; // pre-formatted, e.g. "Wednesday, August 12, 2026"
   attendanceCount: number; // all non-voided attendees (members+leadership+visitors)
@@ -33,6 +39,7 @@ export type LeadershipReportData = {
   activeMemberCount: number;
   membershipGoal: number; // 25
   weeklyCounts: WeeklyCount[]; // up to the last 6 meetings, chronological oldest -> newest
+  visitorSources: VisitorSource[];
   siteUrl: string;
 };
 
@@ -79,6 +86,11 @@ function weeklyCountsLine(weeklyCounts: WeeklyCount[]): string {
   return weeklyCounts.map((w) => w.count).join(' · ');
 }
 
+function visitorSourcesLine(visitorSources: VisitorSource[]): string {
+  if (visitorSources.length === 0) return 'No visitors this week.';
+  return visitorSources.map((s) => `${s.source} (${s.count})`).join(' · ');
+}
+
 export function leadershipReportHtml(data: LeadershipReportData): string {
   const visitorsHtml = data.visitors.length > 0
     ? data.visitors.map(visitorRow).join('')
@@ -116,6 +128,9 @@ export function leadershipReportHtml(data: LeadershipReportData): string {
         ${visitorsHtml}
         ${skippedHtml}
 
+        <p style="margin:24px 0 6px;font-size:14px;font-weight:700;color:#101014;">Visitor sources</p>
+        <p style="margin:0;font-size:14px;color:#3c3c43;">${data.visitorSources.map((s) => `${escapeHtml(s.source)} (${s.count})`).join(' &middot; ') || 'No visitors this week.'}</p>
+
         <p style="margin:24px 0 6px;font-size:14px;font-weight:700;color:#101014;">Last 6 weeks</p>
         <p style="margin:0;font-size:14px;color:#3c3c43;">${weeklyCountsLine(data.weeklyCounts)}</p>
       </div>
@@ -149,6 +164,8 @@ export function leadershipReportText(data: LeadershipReportData): string {
     ...(data.skippedVisitorEmails.length > 0
       ? [`  No email on file (not sent a thank-you): ${data.skippedVisitorEmails.join(', ')}`]
       : []),
+    '',
+    `Visitor sources: ${visitorSourcesLine(data.visitorSources)}`,
     '',
     `Last 6 weeks: ${weeklyCountsLine(data.weeklyCounts)}`,
   ];

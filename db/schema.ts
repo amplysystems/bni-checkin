@@ -14,6 +14,21 @@ export const people = pgTable('people', {
   email: text('email'),
   phone: text('phone'),
   notes: text('notes'),
+  // Phase 2 Task 6 visitor-form addition: the selected "Who invited you?"
+  // answer — either an active member's fullName (free text, not a FK; the
+  // kiosk form snapshots the name at submit time same as every other
+  // visitor-supplied field) or one of the fixed non-member options ('Found
+  // us online', 'Referral', 'Other'). Null for anyone who isn't a visitor
+  // (members/leadership never see this field) or a pre-Task-6 visitor row.
+  // lib/emails/compile.ts groups this meeting's visitors by it for the
+  // weekly report's VISITOR SOURCES line.
+  invitedBy: text('invited_by'),
+  // Phase 2 Task 6 two-visit kiosk rule admin override: set true from the
+  // roster's quiet "Allow another visit" action, consumed (set back false)
+  // by the NEXT checkIn() call for this person that would otherwise be
+  // refused with CheckInError('visit_limit') — see lib/checkins.ts. One
+  // flip authorizes exactly one extra visit, not indefinite bypass.
+  allowExtraVisit: boolean('allow_extra_visit').notNull().default(false),
   deactivatedAt: timestamp('deactivated_at', { withTimezone: true }),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 });
@@ -96,7 +111,18 @@ export const emailMessages = pgTable('email_messages', {
   // never flows through lib/emails/engine.ts's state machine (it's written
   // directly in state 'sent', never draft/awaiting_approval/scheduled) and
   // has no meetingId.
-  type: text('type', { enum: ['leadership_report', 'visitor_thankyou', 'approval_notice', 'weekly_export'] }).notNull(),
+  //
+  // 'rsvp_notice' (Task 6): the one-time "{fullName} plans to visit
+  // Wednesday" / "{fullName} is interested in membership" notification to
+  // the owner, fired by app/rsvp/[token]/page.tsx on a token's first view.
+  // Like approval_notice, it's a real email_messages row (not a
+  // side-channel notification) so send_key `rsvp_notice:{token}` gives it
+  // the same double-send-is-impossible guarantee as everything else — and
+  // like weekly_export, it has no meetingId (an RSVP token outlives any
+  // single meeting's compile).
+  type: text('type', {
+    enum: ['leadership_report', 'visitor_thankyou', 'approval_notice', 'weekly_export', 'rsvp_notice'],
+  }).notNull(),
   meetingId: uuid('meeting_id').references(() => meetings.id),
   recipients: jsonb('recipients').$type<string[]>().notNull(),
   subject: text('subject').notNull(),
@@ -119,12 +145,44 @@ export const emailMessages = pgTable('email_messages', {
 }, (t) => [
   check(
     'email_messages_type_check',
-    sql`${t.type} IN ('leadership_report', 'visitor_thankyou', 'approval_notice', 'weekly_export')`,
+    sql`${t.type} IN ('leadership_report', 'visitor_thankyou', 'approval_notice', 'weekly_export', 'rsvp_notice')`,
   ),
   check(
     'email_messages_state_check',
     sql`${t.state} IN ('draft', 'awaiting_approval', 'approved', 'scheduled', 'sending', 'sent', 'failed')`,
   ),
+]);
+
+// Phase 2 Task 6 one-tap RSVP / interest-capture tokens. One row grants
+// access to the public, unauthenticated /rsvp/[token] page — the token
+// itself IS the auth, so this table intentionally carries no secret beyond
+// the token's own randomness (defaultRandom() -> a v4 UUID, unguessable).
+// 'rsvp' (v1 thank-you CTA) and 'interest' (v2 conversion CTA) are the same
+// page/route with different copy, distinguished by `purpose`. targetDate is
+// always the NEXT meeting date, computed once at compile time
+// (lib/emails/compile.ts) rather than re-derived on every page view, so the
+// confirmation text a visitor sees always describes the meeting the email
+// was actually sent for even if they click the link days later.
+//
+// uniq_rsvp_token_target (personId, purpose, targetDate): makes token
+// creation idempotent — lib/emails/rsvp-tokens.ts's getOrCreateRsvpToken
+// reuses the same token across repeated compiles for the same
+// person+purpose+meeting (an admin re-previewing, or a cron tick calling
+// createDrafts twice) instead of minting a fresh row, and a live one-time
+// link, every call.
+export const rsvpTokens = pgTable('rsvp_tokens', {
+  token: uuid('token').primaryKey().defaultRandom(),
+  personId: uuid('person_id').notNull().references(() => people.id),
+  purpose: text('purpose', { enum: ['rsvp', 'interest'] }).notNull(),
+  targetDate: date('target_date').notNull(),
+  createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
+  // Null until the link is first opened; lib/emails/... firstUsedAt is what
+  // gates the one-time owner notification (app/rsvp/[token]/page.tsx sets it
+  // on first render, not here) — a null read is never itself a write.
+  firstUsedAt: timestamp('first_used_at', { withTimezone: true }),
+}, (t) => [
+  check('rsvp_tokens_purpose_check', sql`${t.purpose} IN ('rsvp', 'interest')`),
+  uniqueIndex('uniq_rsvp_token_target').on(t.personId, t.purpose, t.targetDate),
 ]);
 
 export const emailEvents = pgTable('email_events', {
@@ -189,3 +247,4 @@ export type Person = typeof people.$inferSelect;
 export type Meeting = typeof meetings.$inferSelect;
 export type Attendance = typeof attendance.$inferSelect;
 export type EmailMessage = typeof emailMessages.$inferSelect;
+export type RsvpToken = typeof rsvpTokens.$inferSelect;

@@ -41,3 +41,14 @@ export function approvalNoticeSendKey(meetingId: string): string {
 export function weeklyExportSendKey(dateStr: string): string {
   return `weekly-export:${dateStr}`;
 }
+
+// One per RSVP/interest token (Phase 2 Task 6) — lib/emails/engine.ts's
+// ensureRsvpNotice uses this as its ON CONFLICT target, mirroring
+// ensureApprovalNotice's pattern exactly: the token's own firstUsedAt
+// column (lib/emails/rsvp-tokens.ts's markRsvpTokenUsed) is the PRIMARY
+// atomic guard deciding whether a view is "first," but this send_key gives
+// the resulting notification the same double-send-is-impossible property
+// as everything else the engine sends, independent of that guard.
+export function rsvpNoticeSendKey(token: string): string {
+  return `rsvp_notice:${token}`;
+}

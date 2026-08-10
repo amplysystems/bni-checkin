@@ -18,6 +18,7 @@ function baseReportData(overrides: Partial<LeadershipReportData> = {}): Leadersh
     activeMemberCount: 10,
     membershipGoal: 25,
     weeklyCounts: [],
+    visitorSources: [],
     siteUrl: 'https://example.test',
     ...overrides,
   };
@@ -78,6 +79,16 @@ describe('template HTML escaping at the person-data boundary', () => {
 
     const text = leadershipReportText(data);
     expect(text).toContain(XSS_NAME); // plain text — untouched
+  });
+
+  it('leadershipReportHtml escapes visitor source names; text is untouched', () => {
+    const data = baseReportData({ visitorSources: [{ source: XSS_NAME, count: 2 }] });
+    const html = leadershipReportHtml(data);
+    expect(html).not.toContain(XSS_NAME);
+    expect(html).toContain('&lt;img src=x onerror=1&gt; (2)');
+
+    const text = leadershipReportText(data);
+    expect(text).toContain(XSS_NAME);
   });
 
   it('subject lines are plain text and are never HTML-escaped', () => {

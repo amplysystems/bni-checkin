@@ -20,6 +20,12 @@ type AdminPerson = {
   deactivatedAt: string | null;
   createdAt: string;
   status: PersonStatus;
+  // Phase 2 Task 6 two-visit kiosk rule: total non-voided visitor-kind
+  // visits (0 for anyone who's never been a visitor) and whether an admin
+  // has already armed the one-time override — both computed server-side
+  // (app/api/admin/roster/route.ts's GET), not derived client-side.
+  visitCount: number;
+  allowExtraVisit: boolean;
 };
 
 type RosterResponse = { people: AdminPerson[] };
@@ -274,6 +280,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
   const [reactivatingId, setReactivatingId] = useState<string | null>(null);
   const [makingMemberId, setMakingMemberId] = useState<string | null>(null);
+  const [allowingExtraVisitId, setAllowingExtraVisitId] = useState<string | null>(null);
   const [resettingRateLimits, setResettingRateLimits] = useState(false);
 
   // ---- Emails section state (Phase 2 Task 5) ----
@@ -642,6 +649,30 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     loadAll();
   }, [makingMemberId, showToast, loadAll]);
 
+  // Phase 2 Task 6 admin override for the two-visit kiosk rule — same
+  // one-tap-with-confirm shape as handleMakeMember just above. Arms
+  // people.allow_extra_visit; lib/checkins.ts's checkIn() consumes it (sets
+  // it back false) on that visitor's very next check-in attempt, so this
+  // authorizes exactly one more visit, not indefinite bypass.
+  const handleAllowExtraVisit = useCallback(async (person: AdminPerson) => {
+    if (allowingExtraVisitId) return;
+    const confirmed = window.confirm(
+      `Let ${person.fullName} check in one more time at the kiosk, past the usual two-visit limit?`,
+    );
+    if (!confirmed) return;
+    setAllowingExtraVisitId(person.id);
+    const result = await postJson<{ granted: boolean }>('/api/admin/roster', {
+      action: 'allowExtraVisit', personId: person.id,
+    });
+    setAllowingExtraVisitId(null);
+    if (!result.ok) {
+      showToast(GENERIC_ERROR);
+      return;
+    }
+    showToast(`${person.fullName} can check in one more time`);
+    loadAll();
+  }, [allowingExtraVisitId, showToast, loadAll]);
+
   // ---- Emails panel: preview / approve / send now / retry / compile ----
 
   const handlePreview = useCallback(async (message: EmailMessageRow) => {
@@ -850,11 +881,13 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
                 deactivatingId={deactivatingId}
                 reactivatingId={reactivatingId}
                 makingMemberId={makingMemberId}
+                allowingExtraVisitId={allowingExtraVisitId}
                 onAdd={openCreateDialog}
                 onEdit={openEditDialog}
                 onDeactivate={handleDeactivate}
                 onReactivate={handleReactivate}
                 onMakeMember={handleMakeMember}
+                onAllowExtraVisit={handleAllowExtraVisit}
               />
               <MeetingsPanel meetings={meetings} todayDate={meetingDate} />
               <EmailsSection
@@ -1011,7 +1044,8 @@ function TodayChip({
 
 function RosterPanel({
   people, showDeactivated, onToggleShowDeactivated, deactivatingId, reactivatingId, makingMemberId,
-  onAdd, onEdit, onDeactivate, onReactivate, onMakeMember,
+  allowingExtraVisitId,
+  onAdd, onEdit, onDeactivate, onReactivate, onMakeMember, onAllowExtraVisit,
 }: {
   people: AdminPerson[];
   showDeactivated: boolean;
@@ -1019,11 +1053,13 @@ function RosterPanel({
   deactivatingId: string | null;
   reactivatingId: string | null;
   makingMemberId: string | null;
+  allowingExtraVisitId: string | null;
   onAdd: () => void;
   onEdit: (person: AdminPerson) => void;
   onDeactivate: (person: AdminPerson) => void;
   onReactivate: (person: AdminPerson) => void;
   onMakeMember: (person: AdminPerson) => void;
+  onAllowExtraVisit: (person: AdminPerson) => void;
 }) {
   const sorted = useMemo(
     () => [...people].sort((a, b) => a.fullName.localeCompare(b.fullName)),
@@ -1072,10 +1108,12 @@ function RosterPanel({
                   deactivating={deactivatingId === p.id}
                   reactivating={reactivatingId === p.id}
                   makingMember={makingMemberId === p.id}
+                  allowingExtraVisit={allowingExtraVisitId === p.id}
                   onEdit={() => onEdit(p)}
                   onDeactivate={() => onDeactivate(p)}
                   onReactivate={() => onReactivate(p)}
                   onMakeMember={() => onMakeMember(p)}
+                  onAllowExtraVisit={() => onAllowExtraVisit(p)}
                 />
               ))}
             </tbody>
@@ -1087,19 +1125,26 @@ function RosterPanel({
 }
 
 function RosterRow({
-  person, deactivating, reactivating, makingMember, onEdit, onDeactivate, onReactivate, onMakeMember,
+  person, deactivating, reactivating, makingMember, allowingExtraVisit,
+  onEdit, onDeactivate, onReactivate, onMakeMember, onAllowExtraVisit,
 }: {
   person: AdminPerson;
   deactivating: boolean;
   reactivating: boolean;
   makingMember: boolean;
+  allowingExtraVisit: boolean;
   onEdit: () => void;
   onDeactivate: () => void;
   onReactivate: () => void;
   onMakeMember: () => void;
+  onAllowExtraVisit: () => void;
 }) {
   const meta = STATUS_META[person.status];
   const deactivated = person.deactivatedAt !== null;
+  // Phase 2 Task 6: only a visitor already at (or past) the two-visit
+  // limit ever needs this — showing it for a fresh first-time visitor would
+  // just be noise on every single row.
+  const atVisitLimit = person.status === 'visitor' && person.visitCount >= 2;
   return (
     <tr className={`border-t border-neutral-100 dark:border-neutral-800 ${deactivated ? 'opacity-60' : ''}`}>
       <td className="px-3 py-3 text-sm font-medium text-neutral-900 dark:text-neutral-50">{person.fullName}</td>
@@ -1128,6 +1173,27 @@ function RosterRow({
               >
                 {makingMember ? 'Making member…' : 'Make member'}
               </Button>
+            )}
+            {atVisitLimit && (
+              person.allowExtraVisit ? (
+                // Already armed — quiet static text, not a repeatable
+                // button, since a second click would be a no-op that just
+                // re-confirms the same state (see grantExtraVisit).
+                <span className="mr-4 text-xs text-neutral-400 dark:text-neutral-500">
+                  Extra visit allowed next time
+                </span>
+              ) : (
+                <Button
+                  variant="ghost"
+                  tone="neutral"
+                  size="md"
+                  className="mr-4 !px-0 !py-0"
+                  onClick={onAllowExtraVisit}
+                  disabled={allowingExtraVisit}
+                >
+                  {allowingExtraVisit ? 'Allowing…' : 'Allow another visit'}
+                </Button>
+              )
             )}
             <button
               type="button"

@@ -4,13 +4,22 @@
 // most inboxes); images referenced by absolute URL from the deployed site.
 // Sent by the Phase 2 engine at ~5:30 PM CT on meeting days; reply-to is a
 // human inbox by design.
+//
+// CTA (Phase 2 Task 6): switched from a `mailto:` link to a real one-tap
+// RSVP link — `${siteUrl}/rsvp/{token}`, the per-visitor token
+// lib/emails/compile.ts mints via getOrCreateRsvpToken. `rsvpUrl` defaults
+// to '#' purely so existing callers/tests that don't pass it don't crash;
+// every real send always supplies the real link.
 
 import { escapeHtml } from './escape-html';
 
 export type VisitorThankyouInput = {
   firstName: string;
   siteUrl: string; // e.g. https://bni-checkin-wheeling.netlify.app — no trailing slash
+  rsvpUrl?: string;
 };
+
+const DEFAULT_RSVP_URL = '#';
 
 export const VENUE_LINE_1 = 'Devon Bank';
 export const VENUE_LINE_2 = '561 N Milwaukee Ave, Wheeling, IL 60090';
@@ -20,7 +29,9 @@ export function visitorThankyouSubject(firstName: string): string {
   return `Great meeting you today, ${firstName}`;
 }
 
-export function visitorThankyouHtml({ firstName, siteUrl }: VisitorThankyouInput): string {
+export function visitorThankyouHtml(
+  { firstName, siteUrl, rsvpUrl = DEFAULT_RSVP_URL }: VisitorThankyouInput,
+): string {
   const font =
     "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
   return `<!DOCTYPE html>
@@ -44,7 +55,7 @@ export function visitorThankyouHtml({ firstName, siteUrl }: VisitorThankyouInput
           <p style="margin:2px 0 0;font-size:14px;color:#55555e;">${VENUE_LINE_1}, ${VENUE_LINE_2}</p>
         </div>
         <div style="text-align:center;margin:0 0 18px;">
-          <a href="mailto:?subject=Save%20my%20seat%20for%20Wednesday" style="display:block;background:#CF2030;border-radius:10px;padding:14px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">Save my seat for next Wednesday</a>
+          <a href="${rsvpUrl}" style="display:block;background:#CF2030;border-radius:10px;padding:14px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">Save my seat for next Wednesday</a>
         </div>
         <p style="margin:0;font-size:14px;line-height:1.6;color:#55555e;">Or just hit reply &mdash; this email comes straight to me.</p>
         <p style="margin:16px 0 0;font-size:14px;color:#101014;font-weight:600;">Jason Barrios</p>

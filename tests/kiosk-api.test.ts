@@ -254,6 +254,65 @@ describe('kiosk API', () => {
     expect(body.error).toBe('op_conflict');
   });
 
+  // Phase 2 Task 6: "Who invited you?" storage.
+  it('visitor registration stores the optional invitedBy field, never leaked in the response', async () => {
+    const res = await visitorPOST(post('/api/kiosk/visitor', {
+      fullName: 'Sourced Sam', industry: 'Roofing', company: null,
+      email: 'sam@example.com', phone: null, clientOpId: 'api-op-invited-padded',
+      invitedBy: 'Jason Barrios',
+    }));
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    const [stored] = await db.select().from(people).where(eq(people.id, body.personId));
+    expect(stored.invitedBy).toBe('Jason Barrios');
+    expect(JSON.stringify(body)).not.toContain('invitedBy');
+  });
+
+  it('visitor registration with no invitedBy stores null (field is optional)', async () => {
+    const res = await visitorPOST(post('/api/kiosk/visitor', {
+      fullName: 'No Source Nora', industry: 'Legal', company: null,
+      email: 'nora@example.com', phone: null, clientOpId: 'api-op-no-invited-padded',
+    }));
+    const body = await res.json();
+    const [stored] = await db.select().from(people).where(eq(people.id, body.personId));
+    expect(stored.invitedBy).toBeNull();
+  });
+
+  // Phase 2 Task 6 two-visit kiosk rule, exercised end-to-end through the
+  // real HTTP route (unit coverage of the rule itself, including the
+  // override, lives in tests/checkins.test.ts — this just confirms the
+  // route surfaces the refusal correctly as {error:'visit_limit'}). Each
+  // "visit" needs its OWN meeting (a different Wednesday) — checkIn()
+  // scopes one active attendance row per person per MEETING, so faking the
+  // clock across three different weeks is what actually exercises three
+  // distinct visits rather than three same-day dedupe attempts.
+  it('checkin route refuses a returning visitor\'s 3rd visit with {error:"visit_limit"}', async () => {
+    const WEEK1 = new Date('2026-08-12T19:00:00.000Z');
+    const WEEK2 = new Date(WEEK1.getTime() + 7 * 24 * 60 * 60 * 1000);
+    const WEEK3 = new Date(WEEK1.getTime() + 14 * 24 * 60 * 60 * 1000);
+
+    vi.useFakeTimers({ toFake: ['Date'], now: WEEK1 });
+    const reg = await visitorPOST(post('/api/kiosk/visitor', {
+      fullName: 'Limit Larry', industry: 'Testing', company: null,
+      email: 'larry@example.com', phone: null, clientOpId: 'api-op-limit-1-padded',
+    }));
+    const { personId } = await reg.json();
+
+    vi.setSystemTime(WEEK2);
+    const secondVisit = await checkinPOST(post('/api/kiosk/checkin', {
+      personId, clientOpId: 'api-op-limit-2-padded',
+    }));
+    expect(secondVisit.status).toBe(200);
+    expect((await secondVisit.json()).visitNumber).toBe(2);
+
+    vi.setSystemTime(WEEK3);
+    const thirdVisit = await checkinPOST(post('/api/kiosk/checkin', {
+      personId, clientOpId: 'api-op-limit-3-padded',
+    }));
+    expect(thirdVisit.status).toBe(400);
+    expect((await thirdVisit.json()).error).toBe('visit_limit');
+  });
+
   // Rate limiting (Task 1, phase 2): all requests below share one IP bucket
   // ('unknown') since `post()` sends no x-nf-client-connection-ip /
   // x-forwarded-for headers — that's fine, it isolates per-test via the

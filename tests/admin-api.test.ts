@@ -39,6 +39,7 @@ function get(url: string) {
 type AdminPerson = {
   id: string; fullName: string; email: string | null; phone: string | null;
   industry: string | null; company: string | null; deactivatedAt: string | null;
+  visitCount?: number; allowExtraVisit?: boolean;
 };
 
 describe('admin API', () => {
@@ -330,6 +331,68 @@ describe('admin API', () => {
         action: 'changeStatus', personId: jason.id, to: 'former_member',
       }));
       expect(res.status).toBe(400);
+    });
+  });
+
+  describe('allowExtraVisit action (Phase 2 Task 6 two-visit override)', () => {
+    it('rejects unauthenticated requests with 401', async () => {
+      asAnon();
+      const res = await rosterPOST(post('/api/admin/roster', {
+        action: 'allowExtraVisit', personId: '00000000-0000-0000-0000-000000000000',
+      }));
+      expect(res.status).toBe(401);
+    });
+
+    it('roster GET reports visitCount and allowExtraVisit per person', async () => {
+      asAdmin();
+      const [visitor] = await db.insert(people).values({ fullName: 'Val Visitor' }).returning();
+      await db.insert(memberships).values({ personId: visitor.id, status: 'visitor' });
+      await checkIn(db, { personId: visitor.id, clientOpId: 'aev-1', source: 'kiosk', now: new Date('2026-08-12T19:00:00Z') });
+      await checkIn(db, {
+        personId: visitor.id, clientOpId: 'aev-2', source: 'kiosk', now: new Date('2026-08-19T19:00:00Z'),
+      });
+
+      const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      const val = roster.people.find((p: AdminPerson) => p.id === visitor.id)!;
+      expect(val.visitCount).toBe(2);
+      expect(val.allowExtraVisit).toBe(false);
+
+      // A member/leadership row's visitCount is 0 — the field only ever
+      // counts kind='visitor' attendance.
+      const jason = roster.people.find((p: AdminPerson) => p.fullName === 'Jason Barrios')!;
+      expect(jason.visitCount).toBe(0);
+    });
+
+    it('arms allow_extra_visit; roster GET reflects it; checkIn consumes it on the next visit', async () => {
+      asAdmin();
+      const [visitor] = await db.insert(people).values({ fullName: 'Override Vic' }).returning();
+      await db.insert(memberships).values({ personId: visitor.id, status: 'visitor' });
+      await checkIn(db, { personId: visitor.id, clientOpId: 'aev-3', source: 'kiosk', now: new Date('2026-08-12T19:00:00Z') });
+      await checkIn(db, {
+        personId: visitor.id, clientOpId: 'aev-4', source: 'kiosk', now: new Date('2026-08-19T19:00:00Z'),
+      });
+
+      const res = await rosterPOST(post('/api/admin/roster', {
+        action: 'allowExtraVisit', personId: visitor.id,
+      }));
+      expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ granted: true });
+
+      const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      expect(roster.people.find((p: AdminPerson) => p.id === visitor.id)!.allowExtraVisit).toBe(true);
+
+      const third = await checkIn(db, {
+        personId: visitor.id, clientOpId: 'aev-5', source: 'kiosk', now: new Date('2026-08-26T19:00:00Z'),
+      });
+      expect(third.attendance.visitNumber).toBe(3);
+    });
+
+    it('returns 404 for an unknown personId', async () => {
+      asAdmin();
+      const res = await rosterPOST(post('/api/admin/roster', {
+        action: 'allowExtraVisit', personId: '00000000-0000-0000-0000-000000000000',
+      }));
+      expect(res.status).toBe(404);
     });
   });
 
