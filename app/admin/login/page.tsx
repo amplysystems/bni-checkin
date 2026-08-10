@@ -1,7 +1,12 @@
 import { redirect } from 'next/navigation';
+import { cookies, headers } from 'next/headers';
 import Image from 'next/image';
 import { signIn } from '@/auth';
 import { Button } from '@/components/ui/button';
+import { authConfig, siteUrl } from '@/lib/auth-config';
+import { getDb } from '@/lib/db';
+import { checkRateLimit, getClientIp, OTP_VERIFY_RATE_LIMIT } from '@/lib/rate-limit';
+import { sessionCookieName, sessionCookieOptions, verifyOtpAndCreateSession } from '@/lib/otp';
 
 // amply-logo.png is the real brand asset (cream wordmark + blue square),
 // designed to sit on a dark background — same fixed navy pill treatment as
@@ -31,12 +36,128 @@ const BRAND_RED = '#CF2030';
 const SENT_MESSAGE =
   "Check your email — if that address is invited, a sign-in link is on its way.";
 
+// Deliberately generic across every failure mode this action can hit: wrong
+// code, expired code, unknown/un-allowlisted email, rate-limited — same
+// reasoning as SENT_MESSAGE above (a distinct response per failure reason
+// would itself be an allowlist/rate-limit oracle). "Codes last 15 minutes"
+// nudges the one actually-actionable case (a stale code) without confirming
+// or denying anything about the address itself.
+const CODE_ERROR_MESSAGE = "That code didn't work — codes last 15 minutes. Request a fresh email.";
+
+// Server action for the "Have a code?" form below — verifies a six-digit
+// code (emailed alongside the sign-in link, see lib/otp.ts and
+// emails/login-link.ts) for admins on the INSTALLED iOS/desktop PWA, which
+// has its own cookie jar and can't follow the emailed magic link back into
+// itself. Kept thin on purpose: parse input, rate-limit, delegate the real
+// work to lib/otp.ts's verifyOtpAndCreateSession (unit-tested directly in
+// tests/auth-otp.test.ts), set the cookie, redirect. Not itself unit-tested
+// — repo convention (see AGENTS.md / existing action above) is no
+// component/server-action tests; the pure logic it calls into is.
+async function verifyCode(formData: FormData) {
+  'use server';
+  const email = (formData.get('email') as string | null)?.trim();
+  const code = (formData.get('code') as string | null)?.trim();
+
+  let sessionToken: string | undefined;
+  let sessionExpires: Date | undefined;
+
+  if (email && code) {
+    try {
+      const db = getDb();
+      const ip = getClientIp({ headers: await headers() });
+      const { allowed } = await checkRateLimit(db, { ip, ...OTP_VERIFY_RATE_LIMIT });
+      const secret = process.env.AUTH_SECRET;
+      if (allowed && secret) {
+        const result = await verifyOtpAndCreateSession(db, {
+          email,
+          code,
+          secret,
+          allowlist: process.env.ADMIN_ALLOWLIST,
+          sessionMaxAgeSeconds: authConfig.session.maxAge,
+        });
+        if (result.ok) {
+          sessionToken = result.sessionToken;
+          sessionExpires = result.expires;
+        }
+      }
+    } catch {
+      // Any unexpected failure (DB error, etc.) falls through to the same
+      // neutral failure redirect below rather than surfacing details.
+    }
+  }
+
+  if (sessionToken && sessionExpires) {
+    // useSecureCookies mirrors @auth/core's own derivation
+    // (`config.useSecureCookies ?? url.protocol === 'https:'`, see
+    // node_modules/@auth/core/src/lib/init.ts) — based on AUTH_URL (the
+    // same canonical origin siteUrl() uses to build the link-flow's
+    // verification URL) rather than the incoming request, so both sign-in
+    // paths always agree on whether cookies are secure.
+    const useSecureCookies = new URL(siteUrl()).protocol === 'https:';
+    (await cookies()).set(
+      sessionCookieName(useSecureCookies),
+      sessionToken,
+      sessionCookieOptions(useSecureCookies, sessionExpires),
+    );
+    redirect('/admin');
+  }
+
+  redirect('/admin/login?codeError=1');
+}
+
+// The "Have a code?" disclosure — present in BOTH the initial and sent=1
+// states (an admin on the installed app may land on either). A plain
+// <details>/<summary> rather than client-side state: this page is a Server
+// Component with no 'use client' boundary today, and a zero-JS disclosure
+// keeps it that way. `open` is forced when a submit just failed
+// (codeError=1) so the error message is visible without an extra tap.
+// A second, independent <form> (own email + code inputs) rather than
+// prefilling from the link form's email — this page's state is entirely
+// server-action/searchParams based, there's no client state to share a
+// value from.
+function CodeToggle({ codeError }: { codeError?: string }) {
+  return (
+    <details className="mt-5 text-sm" open={codeError === '1' ? true : undefined}>
+      <summary className="cursor-pointer select-none text-neutral-500 dark:text-neutral-400">
+        Have a code?
+      </summary>
+      <div className="mt-3">
+        {codeError === '1' && (
+          <p className="mb-3 text-sm text-[#CF2030] dark:text-[#F0595F]">{CODE_ERROR_MESSAGE}</p>
+        )}
+        <form action={verifyCode}>
+          <input
+            name="email"
+            type="email"
+            required
+            placeholder="you@example.com"
+            className="mb-2 w-full rounded-xl border border-neutral-200 dark:border-neutral-700 bg-transparent px-4 py-3 text-[15px] text-neutral-900 dark:text-neutral-100"
+          />
+          <input
+            name="code"
+            type="text"
+            inputMode="numeric"
+            pattern="[0-9]{6}"
+            maxLength={6}
+            required
+            placeholder="123456"
+            className="mb-3 w-full rounded-xl border border-neutral-200 dark:border-neutral-700 bg-transparent px-4 py-3 text-[15px] tracking-[0.3em] text-neutral-900 dark:text-neutral-100"
+          />
+          <Button type="submit" variant="secondary" fullWidth>
+            Sign in with code
+          </Button>
+        </form>
+      </div>
+    </details>
+  );
+}
+
 export default async function LoginPage({
   searchParams,
 }: {
-  searchParams: Promise<{ sent?: string }>;
+  searchParams: Promise<{ sent?: string; codeError?: string }>;
 }) {
-  const { sent } = await searchParams;
+  const { sent, codeError } = await searchParams;
 
   return (
     <main className="flex min-h-screen flex-col bg-neutral-100 dark:bg-neutral-950 font-sans md:flex-row">
@@ -82,6 +203,7 @@ export default async function LoginPage({
                   Use a different email
                 </a>
               </div>
+              <CodeToggle codeError={codeError} />
             </>
           ) : (
             <>
@@ -125,6 +247,7 @@ export default async function LoginPage({
                   Send link
                 </Button>
               </form>
+              <CodeToggle codeError={codeError} />
             </>
           )}
         </div>

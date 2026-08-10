@@ -6,13 +6,21 @@
 export type LoginLinkInput = {
   url: string; // the Auth.js verification URL — must be used EXACTLY as given
   siteUrl: string; // canonical origin for image URLs, no trailing slash
+  // Six-digit sign-in code (lib/otp.ts's generateAndStoreOtp), generated
+  // fresh for every send and rides along with the link so an admin on the
+  // INSTALLED iOS/desktop PWA — which has its own cookie jar and can't
+  // follow the emailed link back into itself — can type this into the app
+  // instead. Always present: sendVerificationRequest (lib/auth-config.ts)
+  // generates one on every send, link or not.
+  code: string;
 };
 
 const FONT = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
+const MONO_FONT = "'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace";
 
 export const LOGIN_LINK_SUBJECT = 'Your BNI Wheeling sign-in link';
 
-export function loginLinkHtml({ url, siteUrl }: LoginLinkInput): string {
+export function loginLinkHtml({ url, siteUrl, code }: LoginLinkInput): string {
   return `<!DOCTYPE html>
 <html>
 <body style="margin:0;padding:0;background:#f2f2f5;">
@@ -30,6 +38,11 @@ export function loginLinkHtml({ url, siteUrl }: LoginLinkInput): string {
         <div style="text-align:center;margin:0 0 20px;">
           <a href="${url}" style="display:block;background:#CF2030;border-radius:10px;padding:14px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">Sign in to BNI Wheeling</a>
         </div>
+        <div style="margin:0 0 20px;padding-top:20px;border-top:1px solid #ececf0;">
+          <p style="margin:0 0 10px;font-size:13px;line-height:1.6;color:#8a8a92;">Using the installed app? Enter this code instead:</p>
+          <p style="margin:0;font-family:${MONO_FONT};font-size:32px;font-weight:700;letter-spacing:10px;color:#101014;text-align:center;">${code}</p>
+          <p style="margin:8px 0 0;font-size:12px;color:#a0a0a8;text-align:center;">Expires in 15 minutes.</p>
+        </div>
         <p style="margin:0;font-size:13px;line-height:1.6;color:#8a8a92;">Didn&rsquo;t request this? You can safely ignore it &mdash; nobody can sign in without this email.</p>
       </div>
       <div style="border-top:1px solid #ececf0;padding:14px 28px;">
@@ -41,13 +54,17 @@ export function loginLinkHtml({ url, siteUrl }: LoginLinkInput): string {
 </html>`;
 }
 
-export function loginLinkText({ url }: { url: string }): string {
+export function loginLinkText({ url, code }: { url: string; code: string }): string {
   return [
     'Sign in to your BNI Wheeling admin:',
     '',
     url,
     '',
     'This link works once and expires in 24 hours.',
+    '',
+    `Using the installed app? Enter this code instead: ${code}`,
+    'This code expires in 15 minutes.',
+    '',
     "Didn't request this? You can safely ignore it.",
   ].join('\n');
 }

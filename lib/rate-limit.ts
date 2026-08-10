@@ -50,6 +50,15 @@ export const KIOSK_RATE_LIMITS = {
   undo: { route: 'undo', limit: 40, windowMinutes: 60 },
 } as const satisfies Record<string, RateLimitConfig>;
 
+// Admin auth server-action limit (app/admin/login/page.tsx's verifyCode) —
+// not a kiosk POST route, so kept separate from KIOSK_RATE_LIMITS above.
+// Bounds attempts against the six-digit sign-in code per IP. This is a
+// defense-in-depth backstop, not the primary protection: lib/otp.ts's
+// verifyOtpAndCreateSession already makes brute force impossible on its own
+// by deleting a code on its first use (match or not) — 10/hour just keeps a
+// script from hammering the endpoint with garbage emails/codes.
+export const OTP_VERIFY_RATE_LIMIT: RateLimitConfig = { route: 'otp-verify', limit: 10, windowMinutes: 60 };
+
 // Cleanup is opportunistic: most calls skip it, and the ones that run it
 // fire-and-forget rather than block the caller's request on a sweep.
 // RETENTION_MS only needs to comfortably outlive the longest windowMinutes
@@ -121,7 +130,15 @@ function isPlausibleIp(candidate: string): boolean {
 // warning so any occurrence is visible. Production-only: local dev and the
 // test suite construct bare Requests with no headers constantly, which
 // would otherwise turn this into noise instead of signal.
-export function getClientIp(req: Request): string {
+//
+// Takes `Pick<Request, 'headers'>` rather than a full Request so a Next.js
+// Server Action — which has no Request object, only next/headers' async
+// headers() — can call this too: `getClientIp({ headers: await headers() })`.
+// next/headers' ReadonlyHeaders is itself a `Headers` subtype, so it
+// satisfies this structurally with no adapter needed. Every existing
+// Request-based call site keeps working unchanged (Request already has a
+// `.headers: Headers` property).
+export function getClientIp(req: Pick<Request, 'headers'>): string {
   const nf = req.headers.get('x-nf-client-connection-ip')?.trim();
   if (nf) return nf;
 
