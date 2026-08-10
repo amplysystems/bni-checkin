@@ -264,7 +264,7 @@ export async function compileForMeeting(db: Db, meetingId: string): Promise<Comp
       // 'interest' token — clicking it records interest and notifies Jason
       // either way (the endpoint's behavior doesn't depend on wording) —
       // but the CTA TEXT stays the currently-approved RSVP phrasing
-      // ('I'm coming Wednesday — hold the seat', emails/visitor-
+      // ('I'm interested in membership', emails/visitor-
       // conversion.ts) until Jason signs off on interest-specific copy.
       // Swap only the template's default/callers' copy when that lands;
       // this wiring needs no change.

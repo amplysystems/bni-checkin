@@ -10,15 +10,11 @@
 // lib/emails/compile.ts, which already computes it for the leadership
 // report, rather than this template re-deriving it.
 //
-// CTA STATUS (Task 6 VISION-DOC ADOPTION (1), still pending): the button
-// below is wired to a live per-visitor 'interest' token
-// (lib/emails/compile.ts) and the endpoint it points at DOES record
-// membership interest and notify Jason — the mechanics are live. Only the
-// button's TEXT is still the currently-approved RSVP-style copy ("I'm
-// coming Wednesday — hold the seat"); it stays that way until Jason signs
-// off on interest-specific wording, since a visitor with no visit 3 can't
-// actually RSVP for one. Swap only the string below when that copy lands —
-// no other change needed here or in compile.ts.
+// CTA (Task 6 VISION-DOC ADOPTION (1), APPROVED by Jason 2026-08-10):
+// "I'm interested in membership" — interest capture, not an RSVP, because a
+// visitor after visit 2 has no visit 3 to RSVP for. The button's 'interest'
+// token records the response and notifies Jason (lib/emails/compile.ts,
+// lib/rsvp-visit.ts).
 
 import { MEETING_LINE, VENUE_LINE_1, VENUE_LINE_2 } from './visitor-thankyou';
 import { escapeHtml } from './escape-html';
@@ -77,7 +73,7 @@ export function visitorConversionHtml(
           <p style="margin:2px 0 0;font-size:14px;color:#55555e;">${VENUE_LINE_1}, ${VENUE_LINE_2}</p>
         </div>
         <div style="text-align:center;margin:0 0 18px;">
-          <a href="${rsvpUrl}" style="display:block;background:#CF2030;border-radius:10px;padding:14px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">I&rsquo;m coming Wednesday &mdash; hold the seat</a>
+          <a href="${rsvpUrl}" style="display:block;background:#CF2030;border-radius:10px;padding:14px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">I&rsquo;m interested in membership</a>
         </div>
         <p style="margin:0;font-size:14px;line-height:1.6;color:#55555e;">Questions about membership? Just reply &mdash; this email comes straight to me, and I&rsquo;ll give you the straight answer.</p>
         <p style="margin:16px 0 0;font-size:14px;color:#101014;font-weight:600;">Jason Barrios</p>

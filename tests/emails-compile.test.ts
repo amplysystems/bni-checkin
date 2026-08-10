@@ -120,7 +120,7 @@ describe('compileForMeeting', () => {
     expect(draft.html).not.toContain('COPY PENDING');
     expect(draft.html).toContain('The HVAC seat at Wheeling is still open');
     expect(draft.html).toContain('10 founding members have already claimed theirs');
-    expect(draft.html).toContain('I&rsquo;m coming Wednesday &mdash; hold the seat');
+    expect(draft.html).toContain('I&rsquo;m interested in membership');
     expect(draft.text).toContain('The HVAC seat at Wheeling is still open');
     expect(draft.text).toContain('10 founding members have already claimed theirs');
   });
@@ -371,7 +371,7 @@ describe('compileForMeeting', () => {
       expect(draft.html).toContain(`/rsvp/${tokenRows[0].token}`);
       // Still the currently-approved RSVP-style CTA text (pending Jason's
       // interest-specific copy) — only the href is interest-purpose.
-      expect(draft.html).toContain('I&rsquo;m coming Wednesday &mdash; hold the seat');
+      expect(draft.html).toContain('I&rsquo;m interested in membership');
     });
 
     it('is idempotent: compiling the same meeting twice reuses the same token, not a fresh one', async () => {
