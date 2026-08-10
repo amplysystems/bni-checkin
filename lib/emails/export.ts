@@ -202,7 +202,7 @@ export async function runWeeklyExport(db: Db, now: Date = new Date()): Promise<W
       html,
       text: exportText(dateStr, tableCounts),
       attachments: [attachment],
-    }, now);
+    }, now, db);
 
     await db.update(emailMessages)
       .set({

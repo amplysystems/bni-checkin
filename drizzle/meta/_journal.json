@@ -57,6 +57,13 @@
       "when": 1786355242881,
       "tag": "0007_rsvp-notify-carey",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1786397633088,
+      "tag": "0008_email-safe-mode",
+      "breakpoints": true
     }
   ]
 }

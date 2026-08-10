@@ -6,7 +6,7 @@
 // safe. No JSX is rendered anywhere in this file.
 import { describe, it, expect } from 'vitest';
 import {
-  attendanceErrorMessage, changeStatusErrorMessage, groupEmailMessages,
+  attendanceErrorMessage, changeStatusErrorMessage, compileErrorMessage, groupEmailMessages,
 } from '@/app/admin/admin-client';
 
 describe('attendanceErrorMessage', () => {
@@ -34,6 +34,32 @@ describe('changeStatusErrorMessage', () => {
     expect(changeStatusErrorMessage({ status: 400, error: 'person_deactivated' }))
       .toBe("Can't change status — that person is deactivated.");
     expect(changeStatusErrorMessage({ status: 500 })).toBe('Something went wrong — try again.');
+  });
+});
+
+// The "Get emails ready" (compile) action used to show the generic
+// "Something went wrong" toast on EVERY failure, even though the compile
+// route (app/api/admin/emails' POST action=compile) already returns
+// readable prose for its 400s ("That meeting was canceled." / "That
+// meeting has no check-ins yet…"). compileErrorMessage is what fixes that —
+// it surfaces the route's own error text instead of masking it.
+describe('compileErrorMessage', () => {
+  it('surfaces the route\'s own plain-English 400 text verbatim', () => {
+    expect(compileErrorMessage({ status: 400, error: 'That meeting was canceled.' }))
+      .toBe('That meeting was canceled.');
+    expect(compileErrorMessage({
+      status: 400, error: 'That meeting has no check-ins yet — emails get ready on their own once people check in.',
+    })).toBe('That meeting has no check-ins yet — emails get ready on their own once people check in.');
+  });
+
+  it('404 (no meeting on that date at all) keeps its own dedicated message', () => {
+    expect(compileErrorMessage({ status: 404 })).toBe('No meeting on that date — check the date and try again.');
+  });
+
+  it('falls back to the generic message for a 400 with no error text, or any other status', () => {
+    expect(compileErrorMessage({ status: 400 })).toBe('Something went wrong — try again.');
+    expect(compileErrorMessage({ status: 500 })).toBe('Something went wrong — try again.');
+    expect(compileErrorMessage({ status: 0 })).toBe('Something went wrong — try again.');
   });
 });
 

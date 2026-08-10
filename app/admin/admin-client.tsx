@@ -106,9 +106,23 @@ type EmailSettings = {
   // why this is two fields, not one.
   rsvpNotifyCarey: boolean;
   careyEmail: string | null;
+  // Migration 0008 (System test / safe-mode toggle): NULL = "no admin has
+  // ever touched the toggle, keep following the env default" — see
+  // lib/emails/send.ts's isSafeModeActive for the full precedence rules.
+  // The Email settings card's toggle displays settingsForm.emailSafeMode
+  // when it's non-null, falling back to the currently-effective `safeMode`
+  // (below) otherwise, so the checkbox always reads as "what's happening
+  // right now," never a raw unset state.
+  emailSafeMode: boolean | null;
 };
 
 type SettingsResponse = { settings: EmailSettings };
+
+// ---- Test Lab ("System test" section) types (mirrored from
+// lib/emails/test-lab.ts's TEST_LAB_KINDS / TEST_LAB_SEND_KINDS) ----------
+
+type TestLabKind = 'thankyou_v1' | 'thankyou_v2' | 'weekly_report' | 'rsvp_page';
+type TestLabSendKind = 'thankyou_v1' | 'thankyou_v2' | 'weekly_report';
 
 type CreateStatus = 'member' | 'leadership' | 'visitor';
 
@@ -271,6 +285,20 @@ export function attendanceErrorMessage(result: { status: number; error?: string 
   return GENERIC_ERROR;
 }
 
+// Compile route (app/api/admin/emails' POST action=compile) already returns
+// plain-English 400 error text ("That meeting was canceled." / "That
+// meeting has no check-ins yet — emails get ready on their own once people
+// check in.") — surfacing it directly beats the generic fallback, which
+// previously told an admin something went wrong without saying what. 404
+// (no meeting exists on that date at all) keeps its own dedicated message
+// since that's the one case the route signals with a bare status code, not
+// prose in the body.
+export function compileErrorMessage(result: { status: number; error?: string }): string {
+  if (result.status === 404) return 'No meeting on that date — check the date and try again.';
+  if (result.status === 400 && result.error) return result.error;
+  return GENERIC_ERROR;
+}
+
 // Shared by both changeStatus call sites (the edit dialog's Save flow and
 // the roster row's one-tap "Make member" action) — one POST helper so the
 // two never drift on the action shape.
@@ -341,6 +369,16 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [savingSettings, setSavingSettings] = useState(false);
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [recipientInput, setRecipientInput] = useState('');
+
+  // ---- Safe-mode toggle (Email settings card) ----
+  const [togglingSafeMode, setTogglingSafeMode] = useState(false);
+  const [safeModeOffConfirmOpen, setSafeModeOffConfirmOpen] = useState(false);
+  const [safeModeOffConfirmInput, setSafeModeOffConfirmInput] = useState('');
+  const safeModeOffPreviousFocusRef = useRef<HTMLElement | null>(null);
+
+  // ---- Test Lab ("System test" section) state ----
+  const [testLabPreviewLoadingKind, setTestLabPreviewLoadingKind] = useState<TestLabKind | null>(null);
+  const [testLabSendLoadingKind, setTestLabSendLoadingKind] = useState<TestLabSendKind | null>(null);
 
   const [dialog, setDialog] = useState<DialogState>(null);
   const [form, setForm] = useState<PersonFormState>(emptyForm);
@@ -455,6 +493,18 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   // (the API rejects check-ins for them), so the Today grid only ever shows
   // active people regardless of the roster panel's "show deactivated" toggle.
   const activePeople = useMemo(() => (people ?? []).filter((p) => p.deactivatedAt === null), [people]);
+
+  // Hoisted out of EmailsSection (which used to own the whole "Email
+  // settings" card, including this) now that Email settings is its own
+  // top-level section — EmailSettingsSection needs this same "when did the
+  // last export go out" figure but no longer receives the raw `messages`
+  // list itself.
+  const latestWeeklyExport = useMemo(
+    () => (emailMessages ?? [])
+      .filter((m) => m.type === 'weekly_export' && m.sentAt)
+      .sort((a, b) => (b.sentAt ?? '').localeCompare(a.sentAt ?? ''))[0] ?? null,
+    [emailMessages],
+  );
 
   // ---- Today panel: toggle check-in ----
 
@@ -842,7 +892,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     });
     setCompiling(false);
     if (!result.ok) {
-      showToast(result.status === 404 ? "No meeting on that date — check the date and try again." : GENERIC_ERROR);
+      showToast(compileErrorMessage(result));
       return;
     }
     showToast(
@@ -912,6 +962,101 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
       return { ...f, reportRecipients: f.reportRecipients.filter((e) => e !== email) };
     });
   }, [updateSettingsForm]);
+
+  // ---- Email settings: safe-mode toggle ----
+  // Turning safe mode ON is a plain, immediate save (same shape as
+  // handleToggleApproveMode above) — it can only ever make outbound email
+  // MORE contained, never less, so no confirmation is warranted. Turning it
+  // OFF is the one direction that can put real people's inboxes in the
+  // blast radius of test activity, which is why THAT direction (only) is
+  // gated behind safeModeOffConfirmOpen's typed "OFF" dialog below, per the
+  // spec's explicit call for "a typed confirmation, not just an OK."
+  const handleSetSafeMode = useCallback(async (next: boolean) => {
+    if (togglingSafeMode) return;
+    setTogglingSafeMode(true);
+    const result = await postJson<{ settings: EmailSettings }>('/api/admin/settings', { emailSafeMode: next });
+    setTogglingSafeMode(false);
+    if (!result.ok) {
+      showToast(GENERIC_ERROR);
+      return;
+    }
+    showToast(next ? 'Test mode is on — every email goes to your inbox' : 'Test mode is off — real people will get emails');
+    loadAll();
+  }, [togglingSafeMode, showToast, loadAll]);
+
+  const openSafeModeOffConfirm = useCallback(() => {
+    safeModeOffPreviousFocusRef.current = document.activeElement as HTMLElement | null;
+    setSafeModeOffConfirmInput('');
+    setSafeModeOffConfirmOpen(true);
+  }, []);
+
+  const closeSafeModeOffConfirm = useCallback(() => {
+    setSafeModeOffConfirmOpen(false);
+    setSafeModeOffConfirmInput('');
+    safeModeOffPreviousFocusRef.current?.focus();
+    safeModeOffPreviousFocusRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (!safeModeOffConfirmOpen) return;
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') closeSafeModeOffConfirm(); }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [safeModeOffConfirmOpen, closeSafeModeOffConfirm]);
+
+  // The checkbox's onChange handler: checking it needs no confirmation
+  // (see handleSetSafeMode's comment above); unchecking it opens the typed
+  // confirmation dialog instead of saving anything yet — the actual save
+  // only happens from handleConfirmSafeModeOff once the admin has typed
+  // the exact word.
+  const handleSafeModeCheckboxChange = useCallback((checked: boolean) => {
+    if (checked) {
+      handleSetSafeMode(true);
+    } else {
+      openSafeModeOffConfirm();
+    }
+  }, [handleSetSafeMode, openSafeModeOffConfirm]);
+
+  const handleConfirmSafeModeOff = useCallback(async () => {
+    if (safeModeOffConfirmInput !== 'OFF') return;
+    setSafeModeOffConfirmOpen(false);
+    safeModeOffPreviousFocusRef.current?.focus();
+    safeModeOffPreviousFocusRef.current = null;
+    await handleSetSafeMode(false);
+  }, [safeModeOffConfirmInput, handleSetSafeMode]);
+
+  // ---- Test Lab ("System test" section): preview / send ----
+  // Reuses the exact same EmailPreviewDialog the real Emails panel's
+  // Preview button opens (previewMessage / previewPreviousFocusRef /
+  // closePreview are the SAME state declared above, not a parallel copy) —
+  // a Test Lab preview is visually indistinguishable from a real one,
+  // which is the point: it's the exact HTML a real send would carry.
+  const handleTestLabPreview = useCallback(async (kind: TestLabKind) => {
+    if (testLabPreviewLoadingKind) return;
+    previewPreviousFocusRef.current = document.activeElement as HTMLElement | null;
+    setTestLabPreviewLoadingKind(kind);
+    const result = await postJson<{ subject: string; html: string }>('/api/admin/test-lab', {
+      action: 'preview', kind,
+    });
+    setTestLabPreviewLoadingKind(null);
+    if (!result.ok) {
+      showToast(GENERIC_ERROR);
+      return;
+    }
+    setPreviewMessage({ id: `test-lab:${kind}`, subject: result.data.subject, html: result.data.html });
+  }, [testLabPreviewLoadingKind, showToast]);
+
+  const handleTestLabSend = useCallback(async (kind: TestLabSendKind) => {
+    if (testLabSendLoadingKind) return;
+    setTestLabSendLoadingKind(kind);
+    const result = await postJson<{ sent: boolean }>('/api/admin/test-lab', { action: 'send', kind });
+    setTestLabSendLoadingKind(null);
+    if (!result.ok) {
+      showToast(result.status === 429 ? 'Too many test sends — wait a bit and try again.' : GENERIC_ERROR);
+      return;
+    }
+    showToast(`Sent to ${adminEmail} — check your inbox.`);
+  }, [testLabSendLoadingKind, showToast, adminEmail]);
 
   // ---- Render ----
 
@@ -1003,8 +1148,19 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
                 onCompileDateChange={setCompileDate}
                 compiling={compiling}
                 onCompile={handleCompile}
+              />
+              <TestLabSection
+                previewLoadingKind={testLabPreviewLoadingKind}
+                sendLoadingKind={testLabSendLoadingKind}
+                onPreview={handleTestLabPreview}
+                onSend={handleTestLabSend}
+              />
+              <EmailSettingsSection
                 settingsForm={settingsForm}
+                effectiveSafeMode={emailSafeMode}
+                togglingSafeMode={togglingSafeMode}
                 onToggleApproveMode={handleToggleApproveMode}
+                onSafeModeCheckboxChange={handleSafeModeCheckboxChange}
                 onSettingsFormChange={updateSettingsForm}
                 recipientInput={recipientInput}
                 onRecipientInputChange={setRecipientInput}
@@ -1015,6 +1171,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
                 savingSettings={savingSettings}
                 settingsError={settingsError}
                 onSaveSettings={handleSaveEmailSettings}
+                latestWeeklyExport={latestWeeklyExport}
               />
             </>
           )}
@@ -1039,6 +1196,15 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
           subject={previewMessage.subject}
           html={previewMessage.html}
           onClose={closePreview}
+        />
+      )}
+
+      {safeModeOffConfirmOpen && (
+        <SafeModeOffConfirmDialog
+          value={safeModeOffConfirmInput}
+          onChange={setSafeModeOffConfirmInput}
+          onConfirm={handleConfirmSafeModeOff}
+          onClose={closeSafeModeOffConfirm}
         />
       )}
 
@@ -1646,9 +1812,6 @@ const SEND_NOW_STATES: EmailState[] = ['draft', 'awaiting_approval', 'scheduled'
 function EmailsSection({
   messages, safeMode, previewLoadingId, approvingId, sendingId, onPreview, onApprove, onSendNow,
   compileDate, onCompileDateChange, compiling, onCompile,
-  settingsForm, onToggleApproveMode, onSettingsFormChange,
-  recipientInput, onRecipientInputChange, onAddRecipient, onRemoveRecipient, onToggleRosterRecipient,
-  rosterWithEmail, savingSettings, settingsError, onSaveSettings,
 }: {
   messages: EmailMessageRow[];
   safeMode: boolean;
@@ -1662,27 +1825,9 @@ function EmailsSection({
   onCompileDateChange: (v: string) => void;
   compiling: boolean;
   onCompile: () => void;
-  settingsForm: EmailSettings;
-  onToggleApproveMode: (next: boolean) => void;
-  onSettingsFormChange: (updater: (f: EmailSettings | null) => EmailSettings | null) => void;
-  recipientInput: string;
-  onRecipientInputChange: (v: string) => void;
-  onAddRecipient: () => void;
-  onRemoveRecipient: (email: string) => void;
-  onToggleRosterRecipient: (email: string, checked: boolean) => void;
-  rosterWithEmail: AdminPerson[];
-  savingSettings: boolean;
-  settingsError: string | null;
-  onSaveSettings: () => void;
 }) {
   const groups = useMemo(() => groupEmailMessages(messages), [messages]);
   const failedCount = useMemo(() => messages.filter((m) => m.state === 'failed').length, [messages]);
-  const latestWeeklyExport = useMemo(
-    () => messages
-      .filter((m) => m.type === 'weekly_export' && m.sentAt)
-      .sort((a, b) => (b.sentAt ?? '').localeCompare(a.sentAt ?? ''))[0] ?? null,
-    [messages],
-  );
 
   return (
     <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm dark:bg-neutral-900">
@@ -1747,192 +1892,426 @@ function EmailsSection({
           {compiling ? 'Getting them ready…' : 'Get emails ready'}
         </Button>
       </div>
+    </section>
+  );
+}
 
-      {/* ---- Email settings card ---- */}
-      <div className="mt-6 border-t border-neutral-100 pt-6 dark:border-neutral-800">
-        <h3 className="text-base font-semibold text-neutral-900 dark:text-neutral-50">Email settings</h3>
-        <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-          Controls when the Wednesday emails go out, and who sees the leadership report.
+// ---- Test Lab ("System test" section) --------------------------------------
+// Phase 2 admin sandbox: preview or send yourself any outbound template
+// with sample data, completely isolated from the production pipeline (see
+// app/api/admin/test-lab/route.ts + lib/emails/test-lab.ts). Sits between
+// Emails and Email settings per the spec's layout.
+
+function TestLabGroup({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <div>
+      <p className="mb-2 text-xs font-medium uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+        {title}
+      </p>
+      <div className="flex flex-col gap-2">{children}</div>
+    </div>
+  );
+}
+
+function TestLabRow({
+  label, previewing, sending, onPreview, onSend, sendLabel,
+}: {
+  label: string;
+  previewing: boolean;
+  sending?: boolean;
+  onPreview: () => void;
+  onSend?: () => void;
+  sendLabel?: string;
+}) {
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-neutral-100 px-4 py-3 dark:border-neutral-800">
+      <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">{label}</p>
+      <div className="flex flex-none items-center gap-3">
+        {/* size="md" gives every button here the min-h-[48px] touch target
+            the spec calls for, for free, via components/ui/button.tsx. */}
+        <Button variant="ghost" tone="neutral" size="md" onClick={onPreview} disabled={previewing}>
+          {previewing ? 'Loading…' : 'Preview'}
+        </Button>
+        {onSend && (
+          <Button variant="ghost" tone="brand" size="md" onClick={onSend} disabled={Boolean(sending)}>
+            {sending ? 'Sending…' : (sendLabel ?? 'Send me a copy')}
+          </Button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TestLabSection({
+  previewLoadingKind, sendLoadingKind, onPreview, onSend,
+}: {
+  previewLoadingKind: TestLabKind | null;
+  sendLoadingKind: TestLabSendKind | null;
+  onPreview: (kind: TestLabKind) => void;
+  onSend: (kind: TestLabSendKind) => void;
+}) {
+  return (
+    <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm dark:bg-neutral-900">
+      <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">System test</h2>
+      <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+        Send yourself a copy of any email to see exactly what visitors and leadership get. These never reach real people and never change your data.
+      </p>
+
+      <div className="mt-4 flex flex-col gap-4">
+        <TestLabGroup title="Visitor emails">
+          <TestLabRow
+            label="Visit 1 — thank-you email"
+            previewing={previewLoadingKind === 'thankyou_v1'}
+            sending={sendLoadingKind === 'thankyou_v1'}
+            onPreview={() => onPreview('thankyou_v1')}
+            onSend={() => onSend('thankyou_v1')}
+            sendLabel="Send me Visit 1"
+          />
+          <TestLabRow
+            label="Visit 2 — membership invite"
+            previewing={previewLoadingKind === 'thankyou_v2'}
+            sending={sendLoadingKind === 'thankyou_v2'}
+            onPreview={() => onPreview('thankyou_v2')}
+            onSend={() => onSend('thankyou_v2')}
+            sendLabel="Send me Visit 2"
+          />
+        </TestLabGroup>
+
+        <TestLabGroup title="Leadership">
+          <TestLabRow
+            label="Weekly report"
+            previewing={previewLoadingKind === 'weekly_report'}
+            sending={sendLoadingKind === 'weekly_report'}
+            onPreview={() => onPreview('weekly_report')}
+            onSend={() => onSend('weekly_report')}
+            sendLabel="Send me the weekly report"
+          />
+        </TestLabGroup>
+
+        <TestLabGroup title="RSVP">
+          <TestLabRow
+            label="RSVP confirmation page"
+            previewing={previewLoadingKind === 'rsvp_page'}
+            onPreview={() => onPreview('rsvp_page')}
+          />
+        </TestLabGroup>
+      </div>
+    </section>
+  );
+}
+
+// ---- Email settings section -------------------------------------------------
+// Split out of what used to be a sub-card inside EmailsSection — now its own
+// top-level section per the spec's "System test" layout (Emails, then
+// System test, then Email settings).
+
+function SafeModeToggle({
+  checked, disabled, onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  onChange: (next: boolean) => void;
+}) {
+  return (
+    <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl bg-neutral-50 p-4 dark:bg-neutral-800/50">
+      <input
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        onChange={(e) => onChange(e.target.checked)}
+        className="mt-0.5 h-5 w-5 flex-none rounded border-neutral-300 dark:border-neutral-600"
+      />
+      <span>
+        <span className="block text-sm font-medium text-neutral-900 dark:text-neutral-50">
+          Test mode (safe mode)
+        </span>
+        <span className="mt-0.5 block text-xs text-neutral-500 dark:text-neutral-400">
+          On: every email is redirected to your inbox. Off: real visitors and leadership receive emails.
+        </span>
+      </span>
+    </label>
+  );
+}
+
+function EmailSettingsSection({
+  settingsForm, effectiveSafeMode, togglingSafeMode, onToggleApproveMode, onSafeModeCheckboxChange,
+  onSettingsFormChange,
+  recipientInput, onRecipientInputChange, onAddRecipient, onRemoveRecipient, onToggleRosterRecipient,
+  rosterWithEmail, savingSettings, settingsError, onSaveSettings, latestWeeklyExport,
+}: {
+  settingsForm: EmailSettings;
+  effectiveSafeMode: boolean;
+  togglingSafeMode: boolean;
+  onToggleApproveMode: (next: boolean) => void;
+  onSafeModeCheckboxChange: (next: boolean) => void;
+  onSettingsFormChange: (updater: (f: EmailSettings | null) => EmailSettings | null) => void;
+  recipientInput: string;
+  onRecipientInputChange: (v: string) => void;
+  onAddRecipient: () => void;
+  onRemoveRecipient: (email: string) => void;
+  onToggleRosterRecipient: (email: string, checked: boolean) => void;
+  rosterWithEmail: AdminPerson[];
+  savingSettings: boolean;
+  settingsError: string | null;
+  onSaveSettings: () => void;
+  latestWeeklyExport: EmailMessageRow | null;
+}) {
+  // The checkbox always reads as "what's happening right now": an explicit
+  // settings override wins when one has been set, otherwise it falls back
+  // to the currently-effective safe mode (which itself already folds in
+  // the env default and the forced-ON-on-fallback-sender guard — see
+  // lib/emails/send.ts's isSafeModeActive) rather than showing a
+  // meaningless raw "unset" state.
+  const safeModeChecked = settingsForm.emailSafeMode ?? effectiveSafeMode;
+
+  return (
+    <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm dark:bg-neutral-900">
+      <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">Email settings</h2>
+      <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+        Controls when the Wednesday emails go out, and who sees the leadership report.
+      </p>
+
+      <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl bg-neutral-50 p-4 dark:bg-neutral-800/50">
+        <input
+          type="checkbox"
+          checked={settingsForm.approveMode}
+          onChange={(e) => onToggleApproveMode(e.target.checked)}
+          className="mt-0.5 h-5 w-5 flex-none rounded border-neutral-300 dark:border-neutral-600"
+        />
+        <span>
+          <span className="block text-sm font-medium text-neutral-900 dark:text-neutral-50">
+            Approve before sending
+          </span>
+          <span className="mt-0.5 block text-xs text-neutral-500 dark:text-neutral-400">
+            These send by themselves on Wednesdays. You approve them first while this switch is on.
+          </span>
+        </span>
+      </label>
+
+      <SafeModeToggle checked={safeModeChecked} disabled={togglingSafeMode} onChange={onSafeModeCheckboxChange} />
+
+      <div className="mt-4 grid gap-4 sm:grid-cols-2">
+        <DialogField label="Visitor thank-you time">
+          <input
+            type="time"
+            min="16:45"
+            max="19:45"
+            value={settingsForm.thankyouSendTime}
+            onChange={(e) => onSettingsFormChange((f) => (f ? { ...f, thankyouSendTime: e.target.value } : f))}
+            className={ADMIN_INPUT_CLASS}
+          />
+          <span className="mt-1 block text-xs text-neutral-400 dark:text-neutral-500">
+            Between 4:45 and 7:45 PM — emails go out at the next quarter-hour.
+          </span>
+        </DialogField>
+        <DialogField label="Leadership report time">
+          <input
+            type="time"
+            min="16:45"
+            max="19:45"
+            value={settingsForm.reportSendTime}
+            onChange={(e) => onSettingsFormChange((f) => (f ? { ...f, reportSendTime: e.target.value } : f))}
+            className={ADMIN_INPUT_CLASS}
+          />
+          <span className="mt-1 block text-xs text-neutral-400 dark:text-neutral-500">
+            Between 4:45 and 7:45 PM — emails go out at the next quarter-hour.
+          </span>
+        </DialogField>
+      </div>
+
+      <div className="mt-4">
+        <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Who gets the weekly report</p>
+        <p className="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
+          Jason always gets a copy too, even if this list is empty.
         </p>
 
-        <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl bg-neutral-50 p-4 dark:bg-neutral-800/50">
+        {settingsForm.reportRecipients.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-2">
+            {settingsForm.reportRecipients.map((email) => (
+              <span
+                key={email}
+                className="inline-flex items-center gap-1.5 rounded-full bg-neutral-100 py-1 pl-3 pr-1.5 text-xs font-medium text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300"
+              >
+                {email}
+                <button
+                  type="button"
+                  onClick={() => onRemoveRecipient(email)}
+                  aria-label={`Remove ${email}`}
+                  className="flex h-4 w-4 items-center justify-center rounded-full text-neutral-400 hover:bg-neutral-200 hover:text-neutral-700 dark:hover:bg-neutral-700 dark:hover:text-neutral-100"
+                >
+                  ×
+                </button>
+              </span>
+            ))}
+          </div>
+        )}
+
+        <div className="mt-2 flex gap-2">
+          <input
+            type="email"
+            value={recipientInput}
+            onChange={(e) => onRecipientInputChange(e.target.value)}
+            onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onAddRecipient(); } }}
+            placeholder="name@example.com"
+            className={ADMIN_INPUT_CLASS}
+          />
+          <Button type="button" variant="secondary" onClick={onAddRecipient}>Add</Button>
+        </div>
+
+        {rosterWithEmail.length > 0 && (
+          <div className="mt-3">
+            <p className="text-xs text-neutral-400 dark:text-neutral-500">Or pick from the roster:</p>
+            <div className="mt-1.5 flex flex-col gap-1.5">
+              {rosterWithEmail.map((p) => (
+                <label key={p.id} className="flex items-center gap-2 text-sm text-neutral-700 dark:text-neutral-300">
+                  <input
+                    type="checkbox"
+                    checked={settingsForm.reportRecipients.includes(p.email!)}
+                    onChange={(e) => onToggleRosterRecipient(p.email!, e.target.checked)}
+                    className="h-4 w-4 rounded border-neutral-300 dark:border-neutral-600"
+                  />
+                  {p.fullName} <span className="text-neutral-400 dark:text-neutral-500">({p.email})</span>
+                </label>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      {/* P2-6 carry-in: RSVP owner-notification's optional second
+          recipient. The toggle is disabled (not just unchecked) until an
+          address is on file — turning it on with nothing to notify would
+          silently do nothing, so the control itself refuses to offer
+          that state rather than relying on the save button's error to
+          catch it after the fact. */}
+      <div className="mt-4">
+        <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">When a visitor RSVPs</p>
+        <label
+          className={`mt-2 flex items-start gap-3 rounded-xl bg-neutral-50 p-4 dark:bg-neutral-800/50 ${
+            settingsForm.careyEmail ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
+          }`}
+        >
           <input
             type="checkbox"
-            checked={settingsForm.approveMode}
-            onChange={(e) => onToggleApproveMode(e.target.checked)}
+            checked={settingsForm.rsvpNotifyCarey}
+            disabled={!settingsForm.careyEmail}
+            onChange={(e) => onSettingsFormChange((f) => (f ? { ...f, rsvpNotifyCarey: e.target.checked } : f))}
             className="mt-0.5 h-5 w-5 flex-none rounded border-neutral-300 dark:border-neutral-600"
           />
           <span>
             <span className="block text-sm font-medium text-neutral-900 dark:text-neutral-50">
-              Approve before sending
+              Also notify Carey when a visitor RSVPs
             </span>
             <span className="mt-0.5 block text-xs text-neutral-500 dark:text-neutral-400">
-              These send by themselves on Wednesdays. You approve them first while this switch is on.
+              {settingsForm.careyEmail ? "Jason always gets this — this adds Carey too." : "Add Carey's email first."}
             </span>
           </span>
         </label>
-
-        <div className="mt-4 grid gap-4 sm:grid-cols-2">
-          <DialogField label="Visitor thank-you time">
-            <input
-              type="time"
-              min="16:45"
-              max="19:45"
-              value={settingsForm.thankyouSendTime}
-              onChange={(e) => onSettingsFormChange((f) => (f ? { ...f, thankyouSendTime: e.target.value } : f))}
-              className={ADMIN_INPUT_CLASS}
-            />
-            <span className="mt-1 block text-xs text-neutral-400 dark:text-neutral-500">
-              Between 4:45 and 7:45 PM — emails go out at the next quarter-hour.
-            </span>
-          </DialogField>
-          <DialogField label="Leadership report time">
-            <input
-              type="time"
-              min="16:45"
-              max="19:45"
-              value={settingsForm.reportSendTime}
-              onChange={(e) => onSettingsFormChange((f) => (f ? { ...f, reportSendTime: e.target.value } : f))}
-              className={ADMIN_INPUT_CLASS}
-            />
-            <span className="mt-1 block text-xs text-neutral-400 dark:text-neutral-500">
-              Between 4:45 and 7:45 PM — emails go out at the next quarter-hour.
-            </span>
-          </DialogField>
-        </div>
-
-        <div className="mt-4">
-          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Who gets the weekly report</p>
-          <p className="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
-            Jason always gets a copy too, even if this list is empty.
-          </p>
-
-          {settingsForm.reportRecipients.length > 0 && (
-            <div className="mt-2 flex flex-wrap gap-2">
-              {settingsForm.reportRecipients.map((email) => (
-                <span
-                  key={email}
-                  className="inline-flex items-center gap-1.5 rounded-full bg-neutral-100 py-1 pl-3 pr-1.5 text-xs font-medium text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300"
-                >
-                  {email}
-                  <button
-                    type="button"
-                    onClick={() => onRemoveRecipient(email)}
-                    aria-label={`Remove ${email}`}
-                    className="flex h-4 w-4 items-center justify-center rounded-full text-neutral-400 hover:bg-neutral-200 hover:text-neutral-700 dark:hover:bg-neutral-700 dark:hover:text-neutral-100"
-                  >
-                    ×
-                  </button>
-                </span>
-              ))}
-            </div>
-          )}
-
-          <div className="mt-2 flex gap-2">
+        <div className="mt-2">
+          <DialogField label="Carey's email">
             <input
               type="email"
-              value={recipientInput}
-              onChange={(e) => onRecipientInputChange(e.target.value)}
-              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onAddRecipient(); } }}
-              placeholder="name@example.com"
+              value={settingsForm.careyEmail ?? ''}
+              onChange={(e) => onSettingsFormChange((f) => {
+                if (!f) return f;
+                const trimmed = e.target.value.trim();
+                const careyEmail = trimmed === '' ? null : e.target.value;
+                // Clearing the address also switches the toggle back off
+                // — otherwise it'd sit disabled-but-checked, a confusing
+                // state that would only surface as an error at save time.
+                return { ...f, careyEmail, rsvpNotifyCarey: careyEmail ? f.rsvpNotifyCarey : false };
+              })}
+              placeholder="carey@example.com"
               className={ADMIN_INPUT_CLASS}
             />
-            <Button type="button" variant="secondary" onClick={onAddRecipient}>Add</Button>
-          </div>
-
-          {rosterWithEmail.length > 0 && (
-            <div className="mt-3">
-              <p className="text-xs text-neutral-400 dark:text-neutral-500">Or pick from the roster:</p>
-              <div className="mt-1.5 flex flex-col gap-1.5">
-                {rosterWithEmail.map((p) => (
-                  <label key={p.id} className="flex items-center gap-2 text-sm text-neutral-700 dark:text-neutral-300">
-                    <input
-                      type="checkbox"
-                      checked={settingsForm.reportRecipients.includes(p.email!)}
-                      onChange={(e) => onToggleRosterRecipient(p.email!, e.target.checked)}
-                      className="h-4 w-4 rounded border-neutral-300 dark:border-neutral-600"
-                    />
-                    {p.fullName} <span className="text-neutral-400 dark:text-neutral-500">({p.email})</span>
-                  </label>
-                ))}
-              </div>
-            </div>
-          )}
-        </div>
-
-        {/* P2-6 carry-in: RSVP owner-notification's optional second
-            recipient. The toggle is disabled (not just unchecked) until an
-            address is on file — turning it on with nothing to notify would
-            silently do nothing, so the control itself refuses to offer
-            that state rather than relying on the save button's error to
-            catch it after the fact. */}
-        <div className="mt-4">
-          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">When a visitor RSVPs</p>
-          <label
-            className={`mt-2 flex items-start gap-3 rounded-xl bg-neutral-50 p-4 dark:bg-neutral-800/50 ${
-              settingsForm.careyEmail ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'
-            }`}
-          >
-            <input
-              type="checkbox"
-              checked={settingsForm.rsvpNotifyCarey}
-              disabled={!settingsForm.careyEmail}
-              onChange={(e) => onSettingsFormChange((f) => (f ? { ...f, rsvpNotifyCarey: e.target.checked } : f))}
-              className="mt-0.5 h-5 w-5 flex-none rounded border-neutral-300 dark:border-neutral-600"
-            />
-            <span>
-              <span className="block text-sm font-medium text-neutral-900 dark:text-neutral-50">
-                Also notify Carey when a visitor RSVPs
-              </span>
-              <span className="mt-0.5 block text-xs text-neutral-500 dark:text-neutral-400">
-                {settingsForm.careyEmail ? "Jason always gets this — this adds Carey too." : "Add Carey's email first."}
-              </span>
-            </span>
-          </label>
-          <div className="mt-2">
-            <DialogField label="Carey's email">
-              <input
-                type="email"
-                value={settingsForm.careyEmail ?? ''}
-                onChange={(e) => onSettingsFormChange((f) => {
-                  if (!f) return f;
-                  const trimmed = e.target.value.trim();
-                  const careyEmail = trimmed === '' ? null : e.target.value;
-                  // Clearing the address also switches the toggle back off
-                  // — otherwise it'd sit disabled-but-checked, a confusing
-                  // state that would only surface as an error at save time.
-                  return { ...f, careyEmail, rsvpNotifyCarey: careyEmail ? f.rsvpNotifyCarey : false };
-                })}
-                placeholder="carey@example.com"
-                className={ADMIN_INPUT_CLASS}
-              />
-            </DialogField>
-          </div>
-        </div>
-
-        {settingsError && (
-          <div className={`mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm dark:bg-red-950/40 ${RED_TEXT_CLASS}`}>
-            {settingsError}
-          </div>
-        )}
-
-        <div className="mt-4 flex justify-end">
-          <Button variant="primary" onClick={onSaveSettings} disabled={savingSettings}>
-            {savingSettings ? 'Saving…' : 'Save email settings'}
-          </Button>
-        </div>
-
-        <div className="mt-6 border-t border-neutral-100 pt-4 text-sm dark:border-neutral-800">
-          <p className="font-medium text-neutral-700 dark:text-neutral-300">Weekly backup export</p>
-          <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
-            {latestWeeklyExport?.sentAt
-              ? `Last sent ${formatExportTimestamp(latestWeeklyExport.sentAt)}. `
-              : 'No export sent yet. '}
-            Sunday exports arrive in your inbox.
-          </p>
+          </DialogField>
         </div>
       </div>
+
+      {settingsError && (
+        <div className={`mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm dark:bg-red-950/40 ${RED_TEXT_CLASS}`}>
+          {settingsError}
+        </div>
+      )}
+
+      <div className="mt-4 flex justify-end">
+        <Button variant="primary" onClick={onSaveSettings} disabled={savingSettings}>
+          {savingSettings ? 'Saving…' : 'Save email settings'}
+        </Button>
+      </div>
+
+      <div className="mt-6 border-t border-neutral-100 pt-4 text-sm dark:border-neutral-800">
+        <p className="font-medium text-neutral-700 dark:text-neutral-300">Weekly backup export</p>
+        <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+          {latestWeeklyExport?.sentAt
+            ? `Last sent ${formatExportTimestamp(latestWeeklyExport.sentAt)}. `
+            : 'No export sent yet. '}
+          Sunday exports arrive in your inbox.
+        </p>
+      </div>
     </section>
+  );
+}
+
+// ---- Safe-mode OFF confirmation dialog --------------------------------------
+// Deliberately a TYPED confirmation, not a plain window.confirm() OK/Cancel
+// like every other admin confirm in this file — turning safe mode off means
+// real visitors and leadership start receiving email again, which is
+// consequential enough that the spec calls for requiring the admin to type
+// the literal word "OFF" rather than just clicking through a dialog. Same
+// overlay/Escape/focus-restore shape as the other dialogs in this file
+// (PersonDialog, EmailPreviewDialog) minus the full Tab-focus-trap, since
+// this dialog has exactly one interactive control worth landing on.
+
+const SAFE_MODE_OFF_CONFIRM_WORD = 'OFF';
+
+function SafeModeOffConfirmDialog({
+  value, onChange, onConfirm, onClose,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  onConfirm: () => void;
+  onClose: () => void;
+}) {
+  const confirmDisabled = value !== SAFE_MODE_OFF_CONFIRM_WORD;
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="safe-mode-off-title"
+        className="w-full max-w-md rounded-2xl bg-white p-6 shadow-lg dark:bg-neutral-900"
+      >
+        <h2 id="safe-mode-off-title" className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">
+          Turn off test mode?
+        </h2>
+        <div className={`mt-3 rounded-xl bg-red-50 px-4 py-3 text-sm dark:bg-red-950/40 ${RED_TEXT_CLASS}`}>
+          Real people will receive emails. Type OFF to confirm.
+        </div>
+        <form
+          className="mt-4 flex flex-col gap-3"
+          onSubmit={(e) => { e.preventDefault(); if (!confirmDisabled) onConfirm(); }}
+        >
+          <input
+            type="text"
+            autoFocus
+            autoCapitalize="characters"
+            value={value}
+            onChange={(e) => onChange(e.target.value)}
+            placeholder="Type OFF"
+            aria-label={`Type ${SAFE_MODE_OFF_CONFIRM_WORD} to confirm`}
+            className={ADMIN_INPUT_CLASS}
+          />
+          <div className="mt-2 flex justify-end gap-3">
+            <Button type="button" variant="secondary" onClick={onClose}>Cancel</Button>
+            <Button type="submit" variant="primary" disabled={confirmDisabled}>Turn off test mode</Button>
+          </div>
+        </form>
+      </div>
+    </div>
   );
 }
 

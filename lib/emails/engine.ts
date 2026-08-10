@@ -41,6 +41,9 @@ type SettingsRow = typeof settingsTable.$inferSelect;
 const SETTINGS_DEFAULTS: SettingsRow = {
   id: 1, approveMode: true, reportSendTime: '17:30', thankyouSendTime: '17:00',
   reportRecipients: [], openSeats: [], rsvpNotifyCarey: false, careyEmail: null,
+  // Migration 0008: NULL = "follow lib/emails/send.ts's env-based default,"
+  // same as every other bare/unseeded settings row.
+  emailSafeMode: null,
 };
 
 // Falls back to schema defaults if the singleton row hasn't been seeded
@@ -241,7 +244,7 @@ async function sendWithRetry(db: Db, id: string, alreadyClaimed?: EmailMessage):
   let lastError = '';
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
     try {
-      const result = await sendEmailMessage(toSendable(claimed));
+      const result = await sendEmailMessage(toSendable(claimed), undefined, db);
       const [updated] = await db.update(emailMessages)
         .set({ state: 'sent', sentAt: new Date(), providerMessageId: result.providerMessageId, error: null })
         .where(eq(emailMessages.id, id))

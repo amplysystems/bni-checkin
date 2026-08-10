@@ -237,6 +237,18 @@ export const settings = pgTable('settings', {
   // any path that goes through this app.
   rsvpNotifyCarey: boolean('rsvp_notify_carey').notNull().default(false),
   careyEmail: text('carey_email'),
+  // Migration 0008 (Phase 2 admin Test Lab / safe-mode toggle): a
+  // UI-controllable override for whether outbound email gets redirected to
+  // the owner's inbox. NULL (the default — no admin has ever touched the
+  // toggle) means "follow lib/emails/send.ts's existing env-based logic
+  // unchanged"; true/false is an explicit override written by the Email
+  // settings "Test mode (safe mode)" toggle and always wins over the env
+  // default. Nullable rather than a plain boolean specifically so "never
+  // configured" stays distinguishable from "explicitly forced off" — see
+  // isSafeModeActive's own comment for why that distinction matters (a
+  // fresh/reset deployment must still default to safe, not silently start
+  // sending to real people because a boolean column defaulted to false).
+  emailSafeMode: boolean('email_safe_mode'),
 }, (t) => [
   check('settings_singleton', sql`${t.id} = 1`),
 ]);

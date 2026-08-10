@@ -47,6 +47,14 @@ const Body = z.object({
   // already stored).
   rsvpNotifyCarey: z.boolean().optional(),
   careyEmail: z.string().trim().email().max(320).nullable().optional(),
+  // Migration 0008: the admin Email settings "Test mode (safe mode)"
+  // toggle. Nullable so a future "go back to following the env default"
+  // control has somewhere to write null, even though today's UI only ever
+  // sends true/false (see app/admin/admin-client.tsx's handleSetSafeMode —
+  // turning it OFF is gated behind its own typed confirmation dialog there,
+  // not enforced here; this route just persists whatever value it's given,
+  // same as approveMode).
+  emailSafeMode: z.boolean().nullable().optional(),
 }).refine((b) => Object.keys(b).length > 0, { message: 'No changes to save' });
 
 export async function GET() {

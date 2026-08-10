@@ -133,6 +133,22 @@ describe('admin emails API (app/api/admin/emails)', () => {
       const offBody = (await (await emailsGET()).json()) as { safeMode: boolean };
       expect(offBody.safeMode).toBe(false);
     });
+
+    // Migration 0008: the amber "test mode is on" banner in the admin UI
+    // reads this same `safeMode` field — confirming it now reflects the
+    // settings-column override (not just the env default) is what makes
+    // the banner trustworthy once an admin has used the toggle.
+    it('reflects the settings.email_safe_mode override over the env default', async () => {
+      vi.stubEnv('EMAIL_SAFE_MODE', '0'); // env alone would say OFF
+      await settingsPOST(post('/api/admin/settings', { emailSafeMode: true }));
+      const onBody = (await (await emailsGET()).json()) as { safeMode: boolean };
+      expect(onBody.safeMode).toBe(true);
+
+      vi.stubEnv('EMAIL_SAFE_MODE', undefined); // env alone would say ON
+      await settingsPOST(post('/api/admin/settings', { emailSafeMode: false }));
+      const offBody = (await (await emailsGET()).json()) as { safeMode: boolean };
+      expect(offBody.safeMode).toBe(false);
+    });
   });
 
   describe('POST action=preview', () => {
@@ -414,6 +430,34 @@ describe('admin settings API (app/api/admin/settings)', () => {
   it('an empty body is rejected as "no changes to save"', async () => {
     const res = await settingsPOST(post('/api/admin/settings', {}));
     expect(res.status).toBe(400);
+  });
+
+  // Migration 0008 (System test / safe-mode toggle): settings.email_safe_mode.
+  describe('emailSafeMode (migration 0008)', () => {
+    it('defaults to null (never configured — follows the env default)', async () => {
+      const res = await settingsGET();
+      const body = await res.json();
+      expect(body.settings.emailSafeMode).toBeNull();
+    });
+
+    it('persists an explicit true, then false, across GETs', async () => {
+      const onRes = await settingsPOST(post('/api/admin/settings', { emailSafeMode: true }));
+      expect(onRes.status).toBe(200);
+      expect((await onRes.json()).settings.emailSafeMode).toBe(true);
+      expect((await (await settingsGET()).json()).settings.emailSafeMode).toBe(true);
+
+      const offRes = await settingsPOST(post('/api/admin/settings', { emailSafeMode: false }));
+      expect(offRes.status).toBe(200);
+      expect((await offRes.json()).settings.emailSafeMode).toBe(false);
+      expect((await (await settingsGET()).json()).settings.emailSafeMode).toBe(false);
+    });
+
+    it('accepts null explicitly (back to "follow the env default")', async () => {
+      await settingsPOST(post('/api/admin/settings', { emailSafeMode: true }));
+      const res = await settingsPOST(post('/api/admin/settings', { emailSafeMode: null }));
+      expect(res.status).toBe(200);
+      expect((await res.json()).settings.emailSafeMode).toBeNull();
+    });
   });
 
   // P2-6 carry-in: rsvpNotifyCarey / careyEmail (settings columns added by

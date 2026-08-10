@@ -148,8 +148,10 @@ export async function GET() {
   // Surfaced so the admin UI can show a "test mode is on" banner — without
   // this, a run of 'Sent' chips looks identical whether real visitors got
   // the email or every one of them got silently redirected to the owner's
-  // own inbox with a [SAFE→…] subject prefix (lib/emails/send.ts).
-  return Response.json({ messages: out, safeMode: isSafeModeActive() });
+  // own inbox with a [SAFE→…] subject prefix (lib/emails/send.ts). Threaded
+  // with `db` (migration 0008) so this reflects the settings-column
+  // override, not just the env default.
+  return Response.json({ messages: out, safeMode: await isSafeModeActive(db) });
 }
 
 const Body = z.discriminatedUnion('action', [
