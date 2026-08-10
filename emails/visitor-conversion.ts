@@ -5,20 +5,17 @@
 // Amply footer; same email-client constraints (inline styles, system font
 // stack, absolute image URLs — see visitor-thankyou.ts's header comment).
 //
-// COPY STATUS: PLACEHOLDER. The structure below (acknowledgment headline ->
-// open-seat scarcity for their industry -> one social-proof line -> meeting
-// details -> CTA -> reply line -> signature) is final; the actual WORDING
-// is a first draft only and is NOT approved. Every user-facing string is
-// wrapped in a `/* COPY PENDING JASON'S APPROVAL */` marker. The controller
-// is running a dedicated copy/design review with Jason before this
-// template ships to a real visitor (Phase 2 plan, Task 3 note) — until
-// then this only ever reaches Jason's own inbox (SAFE_MODE).
+// COPY STATUS: APPROVED by Jason, 2026-08-10 — verbatim per the controller.
+// activeMemberCount (the road-to-25 figure) is threaded in from
+// lib/emails/compile.ts, which already computes it for the leadership
+// report, rather than this template re-deriving it.
 
 import { MEETING_LINE, VENUE_LINE_1, VENUE_LINE_2 } from './visitor-thankyou';
 
 export type VisitorConversionInput = {
   firstName: string;
   industry: string | null;
+  activeMemberCount: number;
   siteUrl: string; // e.g. https://bni-checkin-wheeling.netlify.app — no trailing slash
   rsvpUrl?: string; // Task 6 wires a real per-visitor RSVP token; '#' until then
 };
@@ -26,19 +23,24 @@ export type VisitorConversionInput = {
 const FONT = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 const DEFAULT_RSVP_URL = '#';
 
-function industryPhrase(industry: string | null): string {
-  return industry && industry.trim() ? industry.trim() : 'your industry';
+// Used verbatim as stored on the person record — no case transformation.
+function industryOrNull(industry: string | null): string | null {
+  return industry && industry.trim() ? industry.trim() : null;
 }
 
-export function visitorConversionSubject(firstName: string): string {
-  /* COPY PENDING JASON'S APPROVAL */
-  return `Twice now, ${firstName} — let's talk`;
+export function visitorConversionSubject(firstName: string, industry: string | null): string {
+  const seat = industryOrNull(industry);
+  return seat ? `The ${seat} seat is still open, ${firstName}` : `A seat is still open for you, ${firstName}`;
+}
+
+function seatSentence(industry: string | null): string {
+  const seat = industryOrNull(industry);
+  return seat ? `The ${seat} seat at Wheeling is still open` : 'Your seat at Wheeling is still open';
 }
 
 export function visitorConversionHtml(
-  { firstName, industry, siteUrl, rsvpUrl = DEFAULT_RSVP_URL }: VisitorConversionInput,
+  { firstName, industry, activeMemberCount, siteUrl, rsvpUrl = DEFAULT_RSVP_URL }: VisitorConversionInput,
 ): string {
-  const seat = industryPhrase(industry);
   return `<!DOCTYPE html>
 <html>
 <body style="margin:0;padding:0;background:#f2f2f5;">
@@ -50,23 +52,20 @@ export function visitorConversionHtml(
         <span style="color:#f5f2ea;font-size:13px;letter-spacing:3px;font-weight:600;vertical-align:middle;">WHEELING</span>
       </div>
       <div style="padding:28px;">
-        <!-- COPY PENDING JASON'S APPROVAL: "twice now" acknowledgment headline -->
-        <p style="margin:0 0 6px;font-size:23px;font-weight:800;letter-spacing:-0.5px;color:#101014;">Twice now. That&rsquo;s not an accident.</p>
+        <p style="margin:0 0 6px;font-size:23px;font-weight:800;letter-spacing:-0.5px;color:#101014;">Twice now.</p>
         <div style="width:44px;height:3px;background:#CF2030;margin:0 0 16px;"></div>
-        <!-- COPY PENDING JASON'S APPROVAL: acknowledgment + open-seat scarcity line -->
-        <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#3c3c43;">${firstName} &mdash; you&rsquo;ve now visited BNI Wheeling twice, and that tells us something. The ${seat} seat is still open, and we&rsquo;d rather it go to someone who already knows the room.</p>
-        <!-- COPY PENDING JASON'S APPROVAL: one social-proof line -->
-        <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#3c3c43;">Our members pass real business to each other every week &mdash; ask anyone in the room and they&rsquo;ll tell you the same thing.</p>
+        <p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#3c3c43;">${firstName} &mdash; you&rsquo;ve seen the room twice, and the room noticed. So here&rsquo;s the part of BNI that matters most:</p>
+        <p style="margin:0 0 14px;font-size:15px;line-height:1.6;font-weight:600;color:#101014;">One seat per industry. ${seatSentence(industry)} &mdash; and once it&rsquo;s filled, every referral in this room goes to whoever holds it.</p>
+        <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#3c3c43;">${activeMemberCount} founding members have already claimed theirs. They&rsquo;re across the table every Wednesday, passing business to each other on purpose.</p>
         <div style="background:#f7f7f9;border-radius:10px;padding:14px 18px;margin:0 0 20px;">
           <p style="margin:0;font-size:14px;font-weight:700;color:#101014;">BNI Wheeling &middot; weekly meeting</p>
           <p style="margin:2px 0 0;font-size:14px;color:#55555e;">${MEETING_LINE}</p>
           <p style="margin:2px 0 0;font-size:14px;color:#55555e;">${VENUE_LINE_1}, ${VENUE_LINE_2}</p>
         </div>
         <div style="text-align:center;margin:0 0 18px;">
-          <!-- COPY PENDING JASON'S APPROVAL: CTA label -->
-          <a href="${rsvpUrl}" style="display:block;background:#CF2030;border-radius:10px;padding:14px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">Let&rsquo;s talk about the ${seat} seat</a>
+          <a href="${rsvpUrl}" style="display:block;background:#CF2030;border-radius:10px;padding:14px;color:#ffffff;font-size:15px;font-weight:700;text-decoration:none;">I&rsquo;m coming Wednesday &mdash; hold the seat</a>
         </div>
-        <p style="margin:0;font-size:14px;line-height:1.6;color:#55555e;">Or just hit reply &mdash; this email comes straight to me.</p>
+        <p style="margin:0;font-size:14px;line-height:1.6;color:#55555e;">Questions about membership? Just reply &mdash; this email comes straight to me, and I&rsquo;ll give you the straight answer.</p>
         <p style="margin:16px 0 0;font-size:14px;color:#101014;font-weight:600;">Jason Barrios</p>
         <p style="margin:0;font-size:13px;color:#8a8a92;">BNI Wheeling</p>
       </div>
@@ -80,22 +79,22 @@ export function visitorConversionHtml(
 }
 
 export function visitorConversionText(
-  { firstName, industry }: { firstName: string; industry: string | null },
+  { firstName, industry, activeMemberCount }: { firstName: string; industry: string | null; activeMemberCount: number },
 ): string {
-  const seat = industryPhrase(industry);
-  /* COPY PENDING JASON'S APPROVAL */
   return [
-    `Twice now. That's not an accident.`,
+    `Twice now.`,
     ``,
-    `${firstName} — you've now visited BNI Wheeling twice, and that tells us something. The ${seat} seat is still open, and we'd rather it go to someone who already knows the room.`,
+    `${firstName} — you've seen the room twice, and the room noticed. So here's the part of BNI that matters most:`,
     ``,
-    `Our members pass real business to each other every week — ask anyone in the room and they'll tell you the same thing.`,
+    `One seat per industry. ${seatSentence(industry)} — and once it's filled, every referral in this room goes to whoever holds it.`,
+    ``,
+    `${activeMemberCount} founding members have already claimed theirs. They're across the table every Wednesday, passing business to each other on purpose.`,
     ``,
     `BNI Wheeling · weekly meeting`,
     MEETING_LINE,
     `${VENUE_LINE_1}, ${VENUE_LINE_2}`,
     ``,
-    `Just hit reply — this email comes straight to me.`,
+    `Questions about membership? Just reply — this email comes straight to me, and I'll give you the straight answer.`,
     ``,
     `Jason Barrios`,
     `BNI Wheeling`,

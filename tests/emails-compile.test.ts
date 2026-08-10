@@ -95,7 +95,7 @@ describe('compileForMeeting', () => {
     expect(visitorDrafts[0].subject).toContain('First');
   });
 
-  it('visit-2+ visitor gets a v2 conversion draft, keyed by personId not email', async () => {
+  it('visit-2+ visitor gets a v2 conversion draft (approved copy), keyed by personId not email', async () => {
     const priorWeek = new Date('2026-08-05T19:00:00Z'); // the Wednesday before
     const { person } = await registerVisitor(db, {
       fullName: 'Repeat Visitor', industry: 'HVAC', company: null,
@@ -109,9 +109,37 @@ describe('compileForMeeting', () => {
     const { drafts } = await compileForMeeting(db, meeting.id);
     const visitorDrafts = drafts.filter((d): d is VisitorThankyouDraft => d.type === 'visitor_thankyou');
     expect(visitorDrafts).toHaveLength(1);
-    expect(visitorDrafts[0].isConversion).toBe(true);
-    expect(visitorDrafts[0].sendKey).toBe(visitorThankyouSendKey(meeting.id, person!.id));
-    expect(visitorDrafts[0].sendKey).not.toContain('repeat@example.com');
+    const draft = visitorDrafts[0];
+    expect(draft.isConversion).toBe(true);
+    expect(draft.sendKey).toBe(visitorThankyouSendKey(meeting.id, person!.id));
+    expect(draft.sendKey).not.toContain('repeat@example.com');
+
+    // Approved copy (Jason, 2026-08-10) — industry substitution and the
+    // road-to-25 activeMemberCount (10 seeded members) both threaded through.
+    expect(draft.subject).toBe('The HVAC seat is still open, Repeat');
+    expect(draft.html).not.toContain('COPY PENDING');
+    expect(draft.html).toContain('The HVAC seat at Wheeling is still open');
+    expect(draft.html).toContain('10 founding members have already claimed theirs');
+    expect(draft.html).toContain('I&rsquo;m coming Wednesday &mdash; hold the seat');
+    expect(draft.text).toContain('The HVAC seat at Wheeling is still open');
+    expect(draft.text).toContain('10 founding members have already claimed theirs');
+  });
+
+  it('v2 conversion draft falls back to generic wording when the visitor has no industry on file', async () => {
+    const priorWeek = new Date('2026-08-05T19:00:00Z');
+    const [noIndustryPerson] = await db.insert(people).values({
+      fullName: 'No Industry Visitor', email: 'noindustry@example.com',
+    }).returning();
+    await db.insert(memberships).values({ personId: noIndustryPerson.id, status: 'visitor' });
+    await checkIn(db, { personId: noIndustryPerson.id, clientOpId: 'ni-1', source: 'kiosk', now: priorWeek });
+
+    const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
+    await checkIn(db, { personId: noIndustryPerson.id, clientOpId: 'ni-2', source: 'kiosk', now: TARGET_NOW });
+
+    const { drafts } = await compileForMeeting(db, meeting.id);
+    const draft = drafts.find((d): d is VisitorThankyouDraft => d.type === 'visitor_thankyou')!;
+    expect(draft.subject).toBe('A seat is still open for you, No');
+    expect(draft.html).toContain('Your seat at Wheeling is still open');
   });
 
   it('a present visitor with no email is skipped from thank-you drafts but listed in the report', async () => {

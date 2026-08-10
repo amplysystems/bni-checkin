@@ -131,6 +131,10 @@ export async function compileForMeeting(db: Db, meetingId: string): Promise<Comp
   const absentMembers = activeMemberRows
     .filter((m) => !presentMemberIds.has(m.id))
     .map(displayName).sort((a, b) => a.localeCompare(b));
+  // Computed up front (not after the visitor loop) — the v2 conversion
+  // template's "N founding members have already claimed theirs" line needs
+  // it per-draft, same figure the leadership report's road-to-25 bar uses.
+  const activeMemberCount = activeMemberRows.length;
 
   const weeklyCounts = await compileWeeklyCounts(db, meeting.meetingDate);
   const url = siteUrl();
@@ -161,9 +165,9 @@ export async function compileForMeeting(db: Db, meetingId: string): Promise<Comp
         personId: v.personId,
         isConversion: true,
         recipients: [v.email],
-        subject: visitorConversionSubject(firstName),
-        html: visitorConversionHtml({ firstName, industry: v.industry, siteUrl: url }),
-        text: visitorConversionText({ firstName, industry: v.industry }),
+        subject: visitorConversionSubject(firstName, v.industry),
+        html: visitorConversionHtml({ firstName, industry: v.industry, activeMemberCount, siteUrl: url }),
+        text: visitorConversionText({ firstName, industry: v.industry, activeMemberCount }),
       });
     } else {
       visitorDrafts.push({
@@ -179,7 +183,6 @@ export async function compileForMeeting(db: Db, meetingId: string): Promise<Comp
     }
   }
 
-  const activeMemberCount = activeMemberRows.length;
   const reportData: LeadershipReportData = {
     meetingDateLabel,
     attendanceCount: rows.length,

@@ -22,6 +22,14 @@ describe('time helpers (America/Chicago)', () => {
     expect(greetingFor(new Date('2026-08-12T17:00:00Z'))).toBe('Good afternoon');
     expect(greetingFor(new Date('2026-08-12T22:00:00Z'))).toBe('Good evening');
   });
+  it('greets the small hours as evening, not morning — nobody wants "Good morning" at 1 AM', () => {
+    // 06:00 UTC = 1:00 AM CT (CDT, UTC-5).
+    expect(greetingFor(new Date('2026-08-13T06:00:00Z'))).toBe('Good evening');
+  });
+  it('greets at exactly the late-night/morning boundary: 4:59 AM CT is evening, 5:00 AM CT is morning', () => {
+    expect(greetingFor(new Date('2026-08-13T09:59:00Z'))).toBe('Good evening'); // 4:59 AM CT
+    expect(greetingFor(new Date('2026-08-13T10:00:00Z'))).toBe('Good morning'); // 5:00 AM CT
+  });
 });
 
 describe('getOrCreateMeetingFor', () => {
