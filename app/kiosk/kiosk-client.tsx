@@ -74,6 +74,9 @@ const TOAST_MS = 2_500;
 const SEARCH_DEBOUNCE_MS = 250;
 const IDLE_MS = 45_000;
 const CROSSFADE_MS = 8_000;
+// How often CampaignLine's industry ticker advances to the next noun pair
+// (see CampaignLine below).
+const TICKER_MS = 3_500;
 
 // The four ad creatives (see public/ads/) — shared by the attract loop
 // slideshow and the splash backdrop.
@@ -89,13 +92,15 @@ function dayOfYear(date: Date): number {
   return Math.floor(diff / 86_400_000);
 }
 
-// AttractView's prefers-reduced-motion check, via useSyncExternalStore
-// rather than the more familiar "useState + read-in-a-mount-effect"
-// pattern — the latter calls setState synchronously on every mount to sync
-// from an external source (the MediaQueryList), which is exactly the
-// footgun useSyncExternalStore exists to replace (safe under concurrent
-// rendering, and no SSR/hydration mismatch since getServerSnapshot below
-// gives a fixed, non-throwing value before window exists).
+// Shared prefers-reduced-motion check — via useSyncExternalStore rather
+// than the more familiar "useState + read-in-a-mount-effect" pattern — the
+// latter calls setState synchronously on every mount to sync from an
+// external source (the MediaQueryList), which is exactly the footgun
+// useSyncExternalStore exists to replace (safe under concurrent rendering,
+// and no SSR/hydration mismatch since getServerSnapshot below gives a
+// fixed, non-throwing value before window exists). Originally
+// AttractView-only; lifted to a shared hook once CampaignLine's ticker
+// (below) needed the same check for its own motion-safety fallback.
 function subscribeReducedMotion(onChange: () => void): () => void {
   const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
   mq.addEventListener('change', onChange);
@@ -106,6 +111,13 @@ function getReducedMotionSnapshot(): boolean {
 }
 function getReducedMotionServerSnapshot(): boolean {
   return false; // no window server-side; client re-syncs the real value immediately after hydration
+}
+function useReducedMotion(): boolean {
+  return useSyncExternalStore(
+    subscribeReducedMotion,
+    getReducedMotionSnapshot,
+    getReducedMotionServerSnapshot,
+  );
 }
 
 // Brand accent. Kept as a single JS constant for reference, but Tailwind's
@@ -274,22 +286,92 @@ function RailAmplyFooter() {
   );
 }
 
-// The two rotating campaign lines for the rail's bottom (and, statically, the
-// login rail — app/admin/login/page.tsx). Alternates by day-of-year using the
-// same dayOfYear() selection already used for the daily ad (dailyAdSrc in
-// KioskClient below), so it changes once a day rather than per render.
-function CampaignLine({ index, size = 'rail' }: { index: number; size?: 'rail' | 'attract' }) {
+// Curated noun list for CampaignLine's cycling ticker (below) — client-side
+// kiosk only. The static server-rendered login rail (app/admin/login/
+// page.tsx) keeps its own hardcoded "One plumber. / One lawyer." copy and
+// is deliberately untouched by this change: it's a server component with
+// no interval to drive a cycle, and a login screen isn't where a recruiting
+// pitch needs to keep moving.
+//
+// Mixes the chapter's actually-taken seats (plumber, lawyer, realtor, ...)
+// with aspirational open seats (advisor, business coach, insurance agent,
+// restoration pro) — the ticker doubles as recruiting copy for whoever's
+// reading the rail or the attract-loop overlay between check-ins.
+//
+// "advisor", not "financial advisor" — the fuller phrase is what an actual
+// open seat would be called, but "One financial advisor." measures ~23
+// characters (including "One " and the period), well past the ~12-13
+// character ceiling this 300px rail's 236px usable width already
+// established as the safe zone (see CampaignLine's size="rail" comment
+// below) — measured live, it wraps mid-phrase at text-2xl. "advisor" is
+// exactly as long as "plumber" (7 letters each), the shortest/safest noun
+// already proven to fit with room to spare, so swapping just this one word
+// sidesteps the wrap without a per-item font-size hack — which would
+// itself violate the "no layout jumps" requirement below by changing
+// line-height only on the unlucky ticks where this noun happens to show.
+const INDUSTRY_NOUNS = [
+  'plumber', 'lawyer', 'realtor', 'marketer', 'banker', 'accountant',
+  'electrician', 'dentist', 'roofer', 'contractor', 'chiropractor',
+  'photographer', 'landscaper', 'mortgage broker', 'advisor',
+  'business coach', 'insurance agent', 'restoration pro',
+] as const;
+
+// The kiosk-only cycling industry ticker for the rail's bottom, and (at a
+// larger size) the portrait attract-loop overlay (AttractView below) —
+// shared component, so both get the same cycling behavior automatically.
+// Structure is fixed — two cycling noun lines over a static third line
+// ("One of you.", BRAND_RED) — only the nouns cycle, pulled two at a time
+// from INDUSTRY_NOUNS above (noun[i] / noun[i+1], advancing by 2 and
+// wrapping) every TICKER_MS.
+function CampaignLine({ size = 'rail' }: { size?: 'rail' | 'attract' }) {
+  const reducedMotion = useReducedMotion();
+
+  // startIdx is the index of the *first* of the two nouns currently shown
+  // — the second is always startIdx + 1 (wrapped). Advancing by 2 (not 1)
+  // per tick is what keeps a given noun locked to one line rather than
+  // sliding from line 2 up to line 1 on the next tick. Deterministic start
+  // (0 → plumber/lawyer) per spec, no randomness — a kiosk power-cycled
+  // mid-meeting doesn't jump to a random spot in the list.
+  const [startIdx, setStartIdx] = useState(0);
+
+  // Skipped entirely under reduced motion — no interval at all, not just a
+  // faster/instant one, so the ticker shows startIdx's initial pair
+  // (plumber/lawyer) permanently. That's a vestibular-safety call, not
+  // just an animation nicety: an unmoving rail is never a problem, but a
+  // rail whose text keeps changing every 3.5s with zero motion cue *is*
+  // exactly the disorienting "content moves I didn't ask for" pattern
+  // reduced-motion users are opting out of, animated transition or not.
+  //
+  // Also pauses (rather than simply never starting) while the page is
+  // backgrounded (document.hidden via visibilitychange) — an all-day
+  // kiosk has no one watching the rail while hidden, so there's no reason
+  // to keep waking the page on a timer for it.
+  useEffect(() => {
+    if (reducedMotion) return;
+    let id: ReturnType<typeof setInterval> | null = null;
+    const advance = () => setStartIdx((i) => (i + 2) % INDUSTRY_NOUNS.length);
+    const start = () => { if (id === null) id = setInterval(advance, TICKER_MS); };
+    const stop = () => { if (id !== null) { clearInterval(id); id = null; } };
+    const handleVisibility = () => (document.hidden ? stop() : start());
+
+    if (!document.hidden) start();
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      stop();
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [reducedMotion]);
+
+  const noun1 = INDUSTRY_NOUNS[startIdx];
+  const noun2 = INDUSTRY_NOUNS[(startIdx + 1) % INDUSTRY_NOUNS.length];
+
   // text-2xl, not text-3xl: measured live against this 300px rail's usable
-  // width (236px) — at text-3xl, "One plumber." (the shortest of the three
-  // scripted lines) still wraps mid-phrase into "One" / "plumber." on two
-  // lines, since Unbounded is noticeably wider than the Archivo this
-  // replaced (see app/layout.tsx). text-2xl keeps every line of both
-  // rotating variants' shorter phrases on one line; the longer phrases in
-  // the second variant ("The best opportunities" / "They're across the
-  // table.") are long enough in plain English that they still wrap even at
-  // this size — that's a copy-length issue, not something a font-size
-  // tweak alone can fully solve, and rewriting the approved campaign copy
-  // is out of scope here.
+  // width (236px) — at text-3xl, "One plumber." (the shortest noun) still
+  // wraps mid-phrase into "One" / "plumber." on two lines, since Unbounded
+  // is noticeably wider than the Archivo this replaced (see app/layout.tsx).
+  // text-2xl keeps every shorter noun on one line; see INDUSTRY_NOUNS above
+  // for how the one noun long enough to threaten that ("financial advisor")
+  // was handled.
   //
   // font-black (900), not font-extrabold (800) — only 700/900 are loaded
   // for Unbounded (see app/layout.tsx), so 800 isn't an actual loaded
@@ -303,29 +385,43 @@ function CampaignLine({ index, size = 'rail' }: { index: number; size?: 'rail' |
   const className = size === 'attract'
     ? 'font-display text-4xl sm:text-5xl md:text-6xl font-black leading-tight tracking-tight text-neutral-50'
     : 'font-display text-2xl font-black leading-tight tracking-tight text-neutral-50';
-  if (index % 2 === 0) {
-    return (
-      <p className={className}>
-        One plumber.
-        <br />
-        One lawyer.
-        <br />
-        <span style={{ color: BRAND_RED }}>One of you.</span>
-      </p>
-    );
-  }
-  // Rail-fit cut of the campaign line: the full tagline's closing phrase
-  // ("They're across the table.") can't fit the 300px rail at a legible
-  // size, so the rail runs the three-word form with deliberate breaks —
-  // the full line lives on in the ad creatives themselves.
+
+  // Plain <div>s, not <p> — a <p> carries a default browser margin that
+  // would space these three lines apart; leading-tight (in className
+  // above) is what's meant to control the vertical rhythm here, the same
+  // as the single multi-line <p> this replaced.
   return (
-    <p className={className}>
-      The best
-      <br />
-      opportunities
-      <br />
-      <span style={{ color: BRAND_RED }}>aren&apos;t online.</span>
-    </p>
+    <div className={className}>
+      <TickerNounLine noun={noun1} tickKey={startIdx} animate={!reducedMotion} />
+      <TickerNounLine noun={noun2} tickKey={startIdx} animate={!reducedMotion} />
+      <div style={{ color: BRAND_RED }}>One of you.</div>
+    </div>
+  );
+}
+
+// One of CampaignLine's two cycling lines. overflow-hidden reserves a
+// fixed one-line box — leading-tight on the CampaignLine wrapper already
+// fixes the line-height, this just clips the slide-in transform so it can
+// never make the box itself taller and reflow the rail: the animated
+// span's own translate-y briefly carries it outside that box's normal
+// flow, and overflow-hidden crops that instead of the container growing to
+// fit it.
+//
+// Keyed by tickKey (CampaignLine's shared startIdx): a key change
+// unmounts/remounts the span, which is what (re)triggers the CSS
+// animate-ticker-in keyframe (see app/globals.css) on every tick — no
+// animation library, no imperative restart logic, just React's ordinary
+// remount-on-key-change behavior driving a plain CSS animation. `animate`
+// is false under reduced motion (CampaignLine never changes tickKey in
+// that case anyway, so this is belt-and-suspenders against ever animating
+// the very first mount).
+function TickerNounLine({ noun, tickKey, animate }: { noun: string; tickKey: number; animate: boolean }) {
+  return (
+    <div className="overflow-hidden">
+      <span key={tickKey} className={animate ? 'inline-block animate-ticker-in' : 'inline-block'}>
+        One {noun}.
+      </span>
+    </div>
   );
 }
 
@@ -368,8 +464,8 @@ function KioskTopBar({
 
 // ---- Split rail (md+ grid view only) --------------------------------------
 //
-// The grid view's left rail: brand mark, a large live clock, a rotating
-// campaign line, and the amply/admin footer — fixed-width and always dark
+// The grid view's left rail: brand mark, a large live clock, a cycling
+// campaign ticker, and the amply/admin footer — fixed-width and always dark
 // (RAIL_NAVY), independent of the OS theme, same rationale as the amply pill.
 // `hidden md:flex`: below md the grid view falls back to the single-column
 // mobile layout (KioskTopBar + GridView's own AmplyFooter), so this never
@@ -377,8 +473,6 @@ function KioskTopBar({
 // render as their own exclusive views (see KioskClient's render switch), so
 // there's no risk of the rail showing through underneath them.
 function KioskRail({ roster, clock }: { roster: RosterResponse | null; clock: string }) {
-  const campaignIndex = useMemo(() => dayOfYear(new Date()) % 2, []);
-
   return (
     <aside
       className="hidden md:flex md:min-h-screen md:w-[300px] md:flex-none md:flex-col md:px-8 md:py-8"
@@ -408,7 +502,7 @@ function KioskRail({ roster, clock }: { roster: RosterResponse | null; clock: st
 
       <div className="flex-1" />
 
-      <CampaignLine index={campaignIndex} />
+      <CampaignLine />
 
       <div className="mt-8">
         <RailAmplyFooter />
@@ -437,17 +531,8 @@ function KioskRail({ roster, clock }: { roster: RosterResponse | null; clock: st
 // size="attract") over a stronger scrim — live text reflows to fit the
 // screen instead of being a fixed raster crop.
 function AttractView({ startIndex, onExit }: { startIndex: number; onExit: () => void }) {
-  const reducedMotion = useSyncExternalStore(
-    subscribeReducedMotion,
-    getReducedMotionSnapshot,
-    getReducedMotionServerSnapshot,
-  );
+  const reducedMotion = useReducedMotion();
   const [activeIndex, setActiveIndex] = useState(startIndex % ADS.length);
-
-  // Same day-of-year selection as the rail's CampaignLine (KioskRail above)
-  // and the splash backdrop's dailyAdSrc (KioskClient below) — changes once
-  // a day, not per attract-loop entry or render.
-  const campaignIndex = useMemo(() => dayOfYear(new Date()) % 2, []);
 
   // Advances the slideshow every CROSSFADE_MS. Skipped entirely under
   // reduced motion — that branch below renders one static image (still
@@ -510,7 +595,7 @@ function AttractView({ startIndex, onExit }: { startIndex: number; onExit: () =>
           absent, so it can't intercept a stray tap on this button's tap-
           anywhere-to-exit surface. */}
       <div className="hidden portrait:flex absolute inset-0 items-center justify-center px-10 text-center">
-        <CampaignLine index={campaignIndex} size="attract" />
+        <CampaignLine size="attract" />
       </div>
 
       <p className="absolute inset-x-0 bottom-8 text-center text-sm font-medium text-white">

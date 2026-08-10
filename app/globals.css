@@ -24,6 +24,27 @@
   }
 }
 
+@theme {
+  /* Drives the kiosk campaign ticker's noun-line transition
+     (app/kiosk/kiosk-client.tsx's TickerNounLine) — a plain CSS keyframe
+     fired by React's remount-on-key-change, not a JS animation library.
+     Only ever applied when prefers-reduced-motion doesn't match (see
+     TickerNounLine's `animate` prop), so this rule itself never needs a
+     reduced-motion guard. */
+  --animate-ticker-in: ticker-in 320ms ease-out;
+}
+
+@keyframes ticker-in {
+  from {
+    opacity: 0;
+    transform: translateY(0.5rem);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
 body {
   background: var(--background);
   color: var(--foreground);
