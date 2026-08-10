@@ -1,6 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState, useRef, type ReactNode } from 'react';
+import { Button } from '@/components/ui/button';
 
 // ---- Types (mirrored from the admin API route contracts) ----------------
 
@@ -59,24 +60,20 @@ const GENERIC_ERROR = 'Something went wrong — try again.';
 const SAVE_CONNECTION_ERROR = "Couldn't save — check the connection and try again.";
 const TOAST_MS = 2_500;
 
-// Brand accent. Kept as a single JS constant for reference, but Tailwind's
-// arbitrary-value classes must stay literal strings for its build-time
-// scanner — see the equivalent comment in app/kiosk/kiosk-client.tsx. Any
-// usage that needs to react to component state goes through inline `style`
-// referencing this constant; static, always-red usages keep the literal
-// Tailwind class. This is only safe for BACKGROUND red (white text on top) —
-// it passes contrast in both themes.
-const BRAND_RED = '#CF2030';
-
+// Brand-red background buttons (Save, + Add person, …) now go through
+// components/ui/button.tsx's `primary` variant, which owns the literal
+// bg-[#CF2030] class itself — no local BRAND_RED constant needed here
+// anymore.
+//
 // #CF2030 as TEXT (not background) fails WCAG on dark surfaces: measured
 // ~3.3:1 against neutral-900/neutral-950, short of the 4.5:1 minimum for
 // normal text. Inline `style` can't express a `dark:` variant, so red text
-// uses this literal Tailwind arbitrary-value pair instead — computed
-// contrast for #F0595F against both surfaces is ~5.4:1 (neutral-900) and
-// ~5.9:1 (neutral-950). Written as a literal string (not built from the
-// BRAND_RED constant above) because Tailwind's build-time scanner only sees
-// raw source text, not evaluated JS — a template-interpolated class name is
-// invisible to it.
+// (the dialog's inline error banner, which isn't a button) uses this literal
+// Tailwind arbitrary-value pair instead — computed contrast for #F0595F
+// against both surfaces is ~5.4:1 (neutral-900) and ~5.9:1 (neutral-950).
+// Written as a literal string, not built from a JS constant, because
+// Tailwind's build-time scanner only sees raw source text, not evaluated
+// JS — a template-interpolated class name is invisible to it.
 const RED_TEXT_CLASS = 'text-[#CF2030] dark:text-[#F0595F]';
 
 const ADMIN_INPUT_CLASS =
@@ -599,14 +596,9 @@ function RosterPanel({
             />
             Show deactivated
           </label>
-          <button
-            type="button"
-            onClick={onAdd}
-            style={{ backgroundColor: BRAND_RED }}
-            className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition active:scale-[0.98]"
-          >
+          <Button variant="primary" onClick={onAdd}>
             + Add person
-          </button>
+          </Button>
         </div>
       </div>
 
@@ -668,14 +660,9 @@ function RosterRow({
       </td>
       <td className="px-3 py-3 text-right text-sm">
         {deactivated ? (
-          <button
-            type="button"
-            onClick={onReactivate}
-            disabled={reactivating}
-            className="font-medium text-neutral-600 transition hover:underline disabled:opacity-50 dark:text-neutral-300"
-          >
+          <Button variant="ghost" tone="neutral" size="md" className="!px-0 !py-0" onClick={onReactivate} disabled={reactivating}>
             {reactivating ? 'Reactivating…' : 'Reactivate'}
-          </button>
+          </Button>
         ) : (
           <>
             <button
@@ -686,14 +673,9 @@ function RosterRow({
             >
               Edit
             </button>
-            <button
-              type="button"
-              onClick={onDeactivate}
-              disabled={deactivating}
-              className={`font-medium transition hover:underline disabled:opacity-50 ${RED_TEXT_CLASS}`}
-            >
+            <Button variant="ghost" tone="brand" size="md" className="!px-0 !py-0" onClick={onDeactivate} disabled={deactivating}>
               {deactivating ? 'Deactivating…' : 'Deactivate'}
-            </button>
+            </Button>
           </>
         )}
       </td>
@@ -833,22 +815,12 @@ function PersonDialog({
           )}
 
           <div className="mt-2 flex justify-end gap-3">
-            <button
-              type="button"
-              onClick={onClose}
-              disabled={saving}
-              className="rounded-xl px-4 py-2.5 text-sm font-medium text-neutral-600 transition disabled:opacity-50 dark:text-neutral-300"
-            >
+            <Button type="button" variant="secondary" onClick={onClose} disabled={saving}>
               Cancel
-            </button>
-            <button
-              type="submit"
-              disabled={saving || saveDisabled}
-              style={{ backgroundColor: BRAND_RED }}
-              className="rounded-xl px-5 py-2.5 text-sm font-semibold text-white shadow-sm transition active:scale-[0.98] disabled:opacity-50"
-            >
+            </Button>
+            <Button type="submit" variant="primary" disabled={saving || saveDisabled}>
               {saving ? 'Saving…' : 'Save'}
-            </button>
+            </Button>
           </div>
         </form>
       </div>

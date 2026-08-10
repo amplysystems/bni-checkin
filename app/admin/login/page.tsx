@@ -1,10 +1,15 @@
 import { redirect } from 'next/navigation';
+import Image from 'next/image';
 import { signIn } from '@/auth';
+import { Button } from '@/components/ui/button';
 
-// Brand accent, kept as a single JS constant and applied via inline `style`
-// (not a Tailwind arbitrary-value class) — see the equivalent comment in
-// app/kiosk/kiosk-client.tsx for why.
-const BRAND_RED = '#CF2030';
+// amply-logo.png is the real brand asset (cream wordmark + blue square),
+// designed to sit on a dark background — same fixed navy pill treatment as
+// the kiosk footer (app/kiosk/kiosk-client.tsx's AmplyFooter), duplicated
+// here rather than shared since it's two small call sites, not three (the
+// bar this codebase uses for pulling something into components/ui — see
+// components/ui/button.tsx's docblock).
+const AMPLY_PILL_NAVY = '#0c1322';
 
 // Shown after every submit, regardless of whether the email was actually on
 // the allowlist or the send actually succeeded. Deliberately neutral: an
@@ -23,7 +28,7 @@ export default async function LoginPage({
   const { sent } = await searchParams;
 
   return (
-    <main className="flex min-h-screen items-center justify-center bg-neutral-100 dark:bg-neutral-950 px-6 font-sans">
+    <main className="flex min-h-screen flex-col items-center justify-center gap-6 bg-neutral-100 dark:bg-neutral-950 px-6 font-sans">
       <div className="w-full max-w-sm rounded-2xl bg-white dark:bg-neutral-900 p-6">
         <h1 className="mb-1 text-xl font-semibold text-neutral-900 dark:text-neutral-50">
           BNI Wheeling admin
@@ -69,17 +74,23 @@ export default async function LoginPage({
                 placeholder="you@example.com"
                 className="mb-3 w-full rounded-xl border border-neutral-200 dark:border-neutral-700 bg-transparent px-4 py-3 text-[15px] text-neutral-900 dark:text-neutral-100"
               />
-              <button
-                type="submit"
-                style={{ backgroundColor: BRAND_RED }}
-                className="w-full rounded-xl py-3 text-sm font-medium text-white"
-              >
+              <Button type="submit" variant="primary" fullWidth>
                 Send link
-              </button>
+              </Button>
             </form>
           </>
         )}
       </div>
+
+      <footer className="flex items-center justify-center gap-2 text-sm text-neutral-400 dark:text-neutral-500">
+        <span>Powered by</span>
+        <span
+          className="inline-flex items-center rounded-full px-3 py-1.5"
+          style={{ backgroundColor: AMPLY_PILL_NAVY }}
+        >
+          <Image src="/amply-logo.png" alt="Amply Systems" width={45} height={16} className="h-4 w-auto" />
+        </span>
+      </footer>
     </main>
   );
 }

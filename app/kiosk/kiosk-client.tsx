@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import Image from 'next/image';
+import { Button } from '@/components/ui/button';
 
 // ---- Types (mirrored from the kiosk API route contracts) ----------------
 
@@ -81,15 +82,6 @@ const SEARCH_DEBOUNCE_MS = 250;
 // literal Tailwind class.
 const BRAND_RED = '#CF2030';
 
-// #CF2030 as TEXT (not background) fails WCAG on dark surfaces — measured
-// ~3.68:1 on the splash screen's dark background, short of the 4.5:1 minimum
-// for normal text. Inline `style` can't express a `dark:` variant, so red
-// text uses this literal Tailwind arbitrary-value pair instead (#F0595F
-// computes to ~5.4-5.9:1 against neutral-900/950). Written as a literal
-// string, not built from BRAND_RED above, because Tailwind's build-time
-// scanner only sees raw source text, not evaluated JS.
-const RED_TEXT_CLASS = 'text-[#CF2030] dark:text-[#F0595F]';
-
 // Shared by every visitor-form text input; only the border reacts to
 // validation state, via VISITOR_INPUT_ERROR_STYLE below.
 const VISITOR_INPUT_CLASS =
@@ -153,6 +145,27 @@ function CheckMark({ className }: { className?: string }) {
       <path d="M5 12.5L10 17.5L19 7.5" stroke="currentColor" strokeWidth="2.5"
         strokeLinecap="round" strokeLinejoin="round" />
     </svg>
+  );
+}
+
+// amply-logo.png is the real brand asset (cream wordmark + blue square) —
+// it's designed to sit on a dark background, so it gets its own fixed navy
+// pill rather than the page background. The pill is intentionally identical
+// in both themes: the logo needs the dark surface to read correctly either
+// way, unlike the rest of the page which flips with the OS theme.
+const AMPLY_PILL_NAVY = '#0c1322';
+
+function AmplyFooter() {
+  return (
+    <footer className="mt-10 flex items-center justify-center gap-2 pb-4 text-sm text-neutral-400 dark:text-neutral-500">
+      <span>Powered by</span>
+      <span
+        className="inline-flex items-center rounded-full px-3 py-1.5"
+        style={{ backgroundColor: AMPLY_PILL_NAVY }}
+      >
+        <Image src="/amply-logo.png" alt="Amply Systems" width={45} height={16} className="h-4 w-auto" />
+      </span>
+    </footer>
   );
 }
 
@@ -425,12 +438,12 @@ export default function KioskClient() {
       <header className="flex items-center justify-between px-4 pt-5 sm:px-8">
         <div className="flex items-center gap-2.5">
           <Image
-            src="/bni-logo.jpg"
+            src="/bni-logo-transparent.png"
             alt="BNI"
             width={160}
             height={90}
             priority
-            className="h-8 w-auto rounded-sm sm:h-9"
+            className="h-8 w-auto sm:h-9"
           />
           <span className="text-lg font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
             Wheeling
@@ -563,22 +576,11 @@ function GridView({
           </div>
         )}
 
-        <button
-          type="button"
-          onClick={onOpenVisitorForm}
-          style={{ backgroundColor: BRAND_RED }}
-          className="mt-10 min-h-[64px] w-full rounded-2xl px-6 text-lg font-semibold text-white shadow-sm transition active:scale-[0.98]"
-        >
+        <Button variant="primary" size="lg" fullWidth onClick={onOpenVisitorForm} className="mt-10">
           First time here? Welcome →
-        </button>
+        </Button>
 
-        <footer className="mt-10 flex items-center justify-center gap-2 pb-4 text-sm text-neutral-400 dark:text-neutral-600">
-          <span>Powered by</span>
-          <span className="flex items-center gap-1.5 font-medium text-neutral-500 dark:text-neutral-400">
-            amply
-            <span className="inline-block h-2 w-2 bg-[#2563FF]" />
-          </span>
-        </footer>
+        <AmplyFooter />
       </div>
     </main>
   );
@@ -656,14 +658,9 @@ function SplashView({ info, undoing, onUndo }: { info: SplashInfo; undoing: bool
       <p className="mt-2 text-neutral-500 dark:text-neutral-400">
         Checked in at {formatTime(info.checkedInAt)}
       </p>
-      <button
-        type="button"
-        onClick={onUndo}
-        disabled={undoing}
-        className={`mt-6 flex min-h-[56px] items-center justify-center px-6 text-sm font-medium transition active:scale-[0.98] disabled:opacity-50 ${RED_TEXT_CLASS}`}
-      >
+      <Button variant="ghost" tone="brand" size="touch" onClick={onUndo} disabled={undoing} className="mt-6">
         Not you? Undo
-      </button>
+      </Button>
     </main>
   );
 }
@@ -723,14 +720,17 @@ function VisitorFormView({
                 </button>
               ))}
             </div>
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              tone="neutral"
+              size="touch"
+              fullWidth
               onClick={onNotThatPerson}
               disabled={submitting}
-              className="mt-6 min-h-[56px] w-full rounded-2xl border border-neutral-200 text-base font-medium text-neutral-700 transition active:scale-[0.98] disabled:opacity-50 dark:border-neutral-800 dark:text-neutral-200"
+              className="mt-6"
             >
               No — I&apos;m new here
-            </button>
+            </Button>
           </div>
         ) : (
           <form
@@ -802,14 +802,9 @@ function VisitorFormView({
               </Field>
             </div>
 
-            <button
-              type="submit"
-              disabled={submitting}
-              style={{ backgroundColor: BRAND_RED }}
-              className="mt-8 min-h-[64px] w-full rounded-2xl text-lg font-semibold text-white shadow-sm transition active:scale-[0.98] disabled:opacity-60"
-            >
+            <Button type="submit" variant="primary" size="lg" fullWidth disabled={submitting} className="mt-8">
               {submitting ? 'Checking in…' : 'Check in'}
-            </button>
+            </Button>
 
             <button
               type="button"
