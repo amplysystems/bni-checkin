@@ -832,10 +832,13 @@ export default function KioskClient() {
   // an empty array, and GridView only renders the subsection when it's
   // non-empty either way.
   const filteredLeadership = useMemo(() => {
-    if (!roster) return [];
+    // `?? []` guards stale roster objects from before the leadership field
+    // existed (e.g. a hot-reloaded or mid-deploy client whose in-memory
+    // roster predates the API change) — caught crashing live, keep it.
+    const leadership = roster?.leadership ?? [];
     const q = query.trim().toLowerCase();
-    if (!q) return roster.leadership;
-    return roster.leadership.filter((m) => matchesQuery(m, q));
+    if (!q) return leadership;
+    return leadership.filter((m) => matchesQuery(m, q));
   }, [roster, query]);
 
   const nameValid = visitorForm.fullName.trim().length >= 2;
