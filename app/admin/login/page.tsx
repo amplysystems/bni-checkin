@@ -57,7 +57,32 @@ export default async function LoginPage({
           </h1>
 
           {sent === '1' ? (
-            <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-300">{SENT_MESSAGE}</p>
+            <>
+              <p className="mt-4 text-sm text-neutral-600 dark:text-neutral-300">{SENT_MESSAGE}</p>
+              {/* Post-send guidance: this state was a dead end (reported live).
+                  The sign-in lands wherever the emailed link is OPENED, so
+                  spell that out, and give both exits. */}
+              <p className="mt-3 text-sm text-neutral-500 dark:text-neutral-400">
+                Open the email on this device and tap the link — you&apos;ll land in the
+                admin, signed in for 7 days. If you open it on your phone instead,
+                the sign-in lives on your phone.
+              </p>
+              <div className="mt-5 flex flex-col gap-2">
+                <a
+                  href="/admin"
+                  className="inline-flex min-h-[48px] w-full items-center justify-center rounded-xl text-sm font-medium text-white"
+                  style={{ backgroundColor: '#CF2030' }}
+                >
+                  I clicked the link — open my admin
+                </a>
+                <a
+                  href="/admin/login"
+                  className="inline-flex min-h-[48px] w-full items-center justify-center rounded-xl border border-neutral-300 text-sm font-medium text-neutral-700 dark:border-neutral-700 dark:text-neutral-300"
+                >
+                  Use a different email
+                </a>
+              </div>
+            </>
           ) : (
             <>
               <p className="mb-4 text-sm text-neutral-500">Enter your email for a sign-in link</p>
