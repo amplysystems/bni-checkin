@@ -160,6 +160,20 @@ function buildUpdateFields(form: PersonFormState, person: AdminPerson): Record<s
   return fields;
 }
 
+// Edit-mode initial value for the status picker, and the baseline the Save
+// flow diffs the picker against to decide whether a changeStatus call is
+// needed at all. The picker only ever offers the three changeStatus targets
+// (member/leadership/visitor); 'former_member' and 'none' have no
+// corresponding option (lib/roster.ts's changeStatus never targets either),
+// so they fall back to 'visitor' — the more conservative of the two
+// "inactive-ish" starting points, since opening the dialog on one of these
+// rare states never silently promotes the person into the member grid on
+// an unrelated field-only save.
+function editStatusDefault(status: PersonStatus): CreateStatus {
+  if (status === 'leadership' || status === 'member' || status === 'visitor') return status;
+  return 'visitor';
+}
+
 async function postJson<T>(
   url: string,
   body: unknown,
@@ -191,6 +205,22 @@ function attendanceErrorMessage(result: { status: number; error?: string }): str
   return GENERIC_ERROR;
 }
 
+// Shared by both changeStatus call sites (the edit dialog's Save flow and
+// the roster row's one-tap "Make member" action) — one POST helper so the
+// two never drift on the action shape.
+function changeStatusRequest(personId: string, to: CreateStatus) {
+  return postJson<{ status: CreateStatus; changed: boolean }>('/api/admin/roster', {
+    action: 'changeStatus', personId, to,
+  });
+}
+
+function changeStatusErrorMessage(result: { status: number; error?: string }): string {
+  if (result.status === 400 && result.error === 'person_deactivated') {
+    return "Can't change status — that person is deactivated.";
+  }
+  return GENERIC_ERROR;
+}
+
 // ---- Root component -----------------------------------------------------
 
 export default function AdminClient({ adminEmail }: { adminEmail: string }) {
@@ -204,6 +234,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [chipPendingId, setChipPendingId] = useState<string | null>(null);
   const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
   const [reactivatingId, setReactivatingId] = useState<string | null>(null);
+  const [makingMemberId, setMakingMemberId] = useState<string | null>(null);
   const [resettingRateLimits, setResettingRateLimits] = useState(false);
 
   const [dialog, setDialog] = useState<DialogState>(null);
@@ -372,7 +403,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
       company: person.company ?? '',
       email: person.email ?? '',
       phone: person.phone ?? '',
-      status: 'member', // not shown/used in edit mode
+      status: editStatusDefault(person.status),
     });
     setFormError(null);
     setDialog({ mode: 'edit', person });
@@ -396,39 +427,83 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   }, [dialog, closeDialog]);
 
   const updateFields = dialog?.mode === 'edit' ? buildUpdateFields(form, dialog.person) : null;
+  const editStatusChanged = dialog?.mode === 'edit' ? form.status !== editStatusDefault(dialog.person.status) : false;
   const saveDisabled = dialog?.mode === 'edit'
-    ? Object.keys(updateFields ?? {}).length === 0
+    ? Object.keys(updateFields ?? {}).length === 0 && !editStatusChanged
     : form.fullName.trim().length < 2;
 
+  // Edit mode can change status and/or fields in one Save click. Rather than
+  // one merged endpoint call, this fires two independent POSTs — changeStatus
+  // (lib/roster.ts's own domain fn, with its own failure modes: 400
+  // person_deactivated) first, then the field update if anything else
+  // changed. Status first means that if the fields POST fails afterward, the
+  // person is still left correctly re-classified rather than the failure
+  // silently reverting a status change the admin already confirmed via the
+  // dialog's Save click.
   const handleSave = useCallback(async () => {
     if (!dialog || saving) return;
     setFormError(null);
     setSaving(true);
 
-    const result = dialog.mode === 'create'
-      ? await postJson<{ person: AdminPerson }>('/api/admin/roster', {
-          action: 'create', fields: formToCreateFields(form), status: form.status,
-        })
-      : await postJson<{ person: AdminPerson }>('/api/admin/roster', {
-          action: 'update', personId: dialog.person.id, fields: buildUpdateFields(form, dialog.person),
-        });
-
-    setSaving(false);
-    if (!result.ok) {
-      // 400 = validation the user can fix (highlighted fields). Anything
-      // else (network drop, 500, …) isn't the user's fault and a toast alone
-      // could be missed while heads-down in the dialog — surface it inline
-      // too, and leave the dialog open with whatever was typed intact.
-      if (result.status === 400) {
-        setFormError('Check the highlighted fields and try again.');
-      } else {
-        setFormError(SAVE_CONNECTION_ERROR);
-        showToast(GENERIC_ERROR);
+    if (dialog.mode === 'create') {
+      const result = await postJson<{ person: AdminPerson }>('/api/admin/roster', {
+        action: 'create', fields: formToCreateFields(form), status: form.status,
+      });
+      setSaving(false);
+      if (!result.ok) {
+        if (result.status === 400) {
+          setFormError('Check the highlighted fields and try again.');
+        } else {
+          setFormError(SAVE_CONNECTION_ERROR);
+          showToast(GENERIC_ERROR);
+        }
+        return;
       }
+      setDialog(null);
+      showToast('Person added');
+      previousFocusRef.current?.focus();
+      previousFocusRef.current = null;
+      loadAll();
       return;
     }
+
+    const statusChanged = form.status !== editStatusDefault(dialog.person.status);
+    const fields = buildUpdateFields(form, dialog.person);
+    const hasFieldChanges = Object.keys(fields).length > 0;
+
+    if (statusChanged) {
+      const statusResult = await changeStatusRequest(dialog.person.id, form.status);
+      if (!statusResult.ok) {
+        setSaving(false);
+        if (statusResult.status === 400) {
+          setFormError(changeStatusErrorMessage(statusResult));
+        } else {
+          setFormError(SAVE_CONNECTION_ERROR);
+          showToast(GENERIC_ERROR);
+        }
+        return;
+      }
+    }
+
+    if (hasFieldChanges) {
+      const fieldsResult = await postJson<{ person: AdminPerson }>('/api/admin/roster', {
+        action: 'update', personId: dialog.person.id, fields,
+      });
+      if (!fieldsResult.ok) {
+        setSaving(false);
+        if (fieldsResult.status === 400) {
+          setFormError('Check the highlighted fields and try again.');
+        } else {
+          setFormError(SAVE_CONNECTION_ERROR);
+          showToast(GENERIC_ERROR);
+        }
+        return;
+      }
+    }
+
+    setSaving(false);
     setDialog(null);
-    showToast(dialog.mode === 'create' ? 'Person added' : 'Changes saved');
+    showToast('Changes saved');
     previousFocusRef.current?.focus();
     previousFocusRef.current = null;
     loadAll();
@@ -467,6 +542,29 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     showToast(`${person.fullName} reactivated`);
     loadAll();
   }, [reactivatingId, showToast, loadAll]);
+
+  // One-tap promotion for a visitor row (the "Eric Knight" case: someone
+  // everyone already knows is joining, and the edit dialog is overkill for
+  // a single-field change). A plain confirm is enough friction for an
+  // action that's easy to reason about and, like every other status
+  // transition, never destructive — the person keeps their id and full
+  // attendance history either way.
+  const handleMakeMember = useCallback(async (person: AdminPerson) => {
+    if (makingMemberId) return;
+    const confirmed = window.confirm(
+      `This makes ${person.fullName} a member — they'll appear on the kiosk with everyone else.`,
+    );
+    if (!confirmed) return;
+    setMakingMemberId(person.id);
+    const result = await changeStatusRequest(person.id, 'member');
+    setMakingMemberId(null);
+    if (!result.ok) {
+      showToast(changeStatusErrorMessage(result));
+      return;
+    }
+    showToast(`${person.fullName} is now a member`);
+    loadAll();
+  }, [makingMemberId, showToast, loadAll]);
 
   // ---- Render ----
 
@@ -525,10 +623,12 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
                 onToggleShowDeactivated={setShowDeactivated}
                 deactivatingId={deactivatingId}
                 reactivatingId={reactivatingId}
+                makingMemberId={makingMemberId}
                 onAdd={openCreateDialog}
                 onEdit={openEditDialog}
                 onDeactivate={handleDeactivate}
                 onReactivate={handleReactivate}
+                onMakeMember={handleMakeMember}
               />
               <MeetingsPanel meetings={meetings} todayDate={meetingDate} />
             </>
@@ -650,17 +750,20 @@ function TodayChip({
 // ---- Roster panel ----------------------------------------------------------
 
 function RosterPanel({
-  people, showDeactivated, onToggleShowDeactivated, deactivatingId, reactivatingId, onAdd, onEdit, onDeactivate, onReactivate,
+  people, showDeactivated, onToggleShowDeactivated, deactivatingId, reactivatingId, makingMemberId,
+  onAdd, onEdit, onDeactivate, onReactivate, onMakeMember,
 }: {
   people: AdminPerson[];
   showDeactivated: boolean;
   onToggleShowDeactivated: (v: boolean) => void;
   deactivatingId: string | null;
   reactivatingId: string | null;
+  makingMemberId: string | null;
   onAdd: () => void;
   onEdit: (person: AdminPerson) => void;
   onDeactivate: (person: AdminPerson) => void;
   onReactivate: (person: AdminPerson) => void;
+  onMakeMember: (person: AdminPerson) => void;
 }) {
   const sorted = useMemo(
     () => [...people].sort((a, b) => a.fullName.localeCompare(b.fullName)),
@@ -708,9 +811,11 @@ function RosterPanel({
                   person={p}
                   deactivating={deactivatingId === p.id}
                   reactivating={reactivatingId === p.id}
+                  makingMember={makingMemberId === p.id}
                   onEdit={() => onEdit(p)}
                   onDeactivate={() => onDeactivate(p)}
                   onReactivate={() => onReactivate(p)}
+                  onMakeMember={() => onMakeMember(p)}
                 />
               ))}
             </tbody>
@@ -722,14 +827,16 @@ function RosterPanel({
 }
 
 function RosterRow({
-  person, deactivating, reactivating, onEdit, onDeactivate, onReactivate,
+  person, deactivating, reactivating, makingMember, onEdit, onDeactivate, onReactivate, onMakeMember,
 }: {
   person: AdminPerson;
   deactivating: boolean;
   reactivating: boolean;
+  makingMember: boolean;
   onEdit: () => void;
   onDeactivate: () => void;
   onReactivate: () => void;
+  onMakeMember: () => void;
 }) {
   const meta = STATUS_META[person.status];
   const deactivated = person.deactivatedAt !== null;
@@ -750,6 +857,18 @@ function RosterRow({
           </Button>
         ) : (
           <>
+            {person.status === 'visitor' && (
+              <Button
+                variant="ghost"
+                tone="neutral"
+                size="md"
+                className="mr-4 !px-0 !py-0"
+                onClick={onMakeMember}
+                disabled={makingMember}
+              >
+                {makingMember ? 'Making member…' : 'Make member'}
+              </Button>
+            )}
             <button
               type="button"
               onClick={onEdit}
@@ -1028,19 +1147,22 @@ function PersonDialog({
               className={ADMIN_INPUT_CLASS}
             />
           </DialogField>
-          {mode === 'create' && (
-            <DialogField label="Status">
-              <select
-                value={form.status}
-                onChange={(e) => setForm((f) => ({ ...f, status: e.target.value as CreateStatus }))}
-                className={ADMIN_INPUT_CLASS}
-              >
-                <option value="member">Member</option>
-                <option value="leadership">Leadership</option>
-                <option value="visitor">Visitor</option>
-              </select>
-            </DialogField>
-          )}
+          <DialogField label="Status">
+            <select
+              value={form.status}
+              onChange={(e) => setForm((f) => ({ ...f, status: e.target.value as CreateStatus }))}
+              className={ADMIN_INPUT_CLASS}
+            >
+              <option value="member">Member</option>
+              <option value="leadership">Leadership</option>
+              <option value="visitor">Visitor</option>
+            </select>
+            {mode === 'edit' && (
+              <span className="mt-1 block text-xs text-neutral-400 dark:text-neutral-500">
+                Changing this moves them between the roster groups — their check-in history stays intact.
+              </span>
+            )}
+          </DialogField>
 
           <div className="mt-2 flex justify-end gap-3">
             <Button type="button" variant="secondary" onClick={onClose} disabled={saving}>

@@ -3,6 +3,7 @@ import { eq, isNull } from 'drizzle-orm';
 import { getDb } from '@/lib/db';
 import { people, memberships, personRoles } from '@/db/schema';
 import { requireAdmin } from '@/lib/admin-guard';
+import { changeStatus, ChangeStatusError } from '@/lib/roster';
 
 // req is optional so every existing test call site that invokes GET() with
 // no arguments keeps working — only the new ?includeDeactivated=1 path needs
@@ -50,6 +51,11 @@ const Body = z.discriminatedUnion('action', [
   }),
   z.object({ action: z.literal('deactivate'), personId: z.string().uuid() }),
   z.object({ action: z.literal('reactivate'), personId: z.string().uuid() }),
+  z.object({
+    action: z.literal('changeStatus'),
+    personId: z.string().uuid(),
+    to: z.enum(['member', 'leadership', 'visitor']),
+  }),
 ]);
 
 export async function POST(req: Request) {
@@ -81,6 +87,23 @@ export async function POST(req: Request) {
     const [row] = await db.update(people).set(d.fields).where(eq(people.id, d.personId)).returning();
     if (!row) return Response.json({ error: 'Not found' }, { status: 404 });
     return Response.json({ person: row });
+  }
+
+  if (d.action === 'changeStatus') {
+    // Same 400-for-domain-error convention as the checkIn/CheckInError
+    // pairing in app/api/admin/attendance/route.ts (only there does an
+    // error code get its own status — op_conflict -> 409 — everything else,
+    // including person_not_found, is 400). No case here needs a
+    // different status, so both ChangeStatusError codes map to 400.
+    try {
+      const result = await changeStatus(db, { personId: d.personId, to: d.to, by: `admin:${guard.email}` });
+      return Response.json({ status: result.status, changed: result.changed });
+    } catch (e) {
+      if (e instanceof ChangeStatusError) {
+        return Response.json({ error: e.code }, { status: 400 });
+      }
+      throw e;
+    }
   }
 
   if (d.action === 'reactivate') {

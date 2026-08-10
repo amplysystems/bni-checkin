@@ -220,6 +220,113 @@ describe('admin API', () => {
     expect(gioRestored.deactivatedAt).toBeNull();
   });
 
+  describe('changeStatus action (Phase 2 Task 2: status editing + membership transitions)', () => {
+    it('rejects unauthenticated requests with 401', async () => {
+      asAnon();
+      const res = await rosterPOST(post('/api/admin/roster', {
+        action: 'changeStatus', personId: '00000000-0000-0000-0000-000000000000', to: 'member',
+      }));
+      expect(res.status).toBe(401);
+    });
+
+    it('visitor -> member moves them into kioskRoster members with visit history intact', async () => {
+      asAdmin();
+      const created = await (await rosterPOST(post('/api/admin/roster', {
+        action: 'create', fields: { fullName: 'Eric Knight' }, status: 'visitor',
+      }))).json();
+
+      const change = await rosterPOST(post('/api/admin/roster', {
+        action: 'changeStatus', personId: created.person.id, to: 'member',
+      }));
+      expect(change.status).toBe(200);
+      const changeBody = await change.json();
+      expect(changeBody).toEqual({ status: 'member', changed: true });
+
+      const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      const ericAfter = roster.people.find((p: AdminPerson) => p.id === created.person.id);
+      expect(ericAfter.status).toBe('member');
+
+      const kiosk = await kioskRoster(db, new Date());
+      expect(kiosk.members.map((m) => m.fullName)).toContain('Eric Knight');
+
+      const ms = await db.select().from(memberships).where(eq(memberships.personId, created.person.id));
+      expect(ms).toHaveLength(2); // original visitor row (closed) + new member row (open)
+      expect(ms.filter((m) => m.endedAt === null)).toHaveLength(1);
+    });
+
+    it('member -> leadership -> member round-trips correctly through the admin route', async () => {
+      asAdmin();
+      const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      const stephanie = roster.people.find((p: AdminPerson) => p.fullName === 'Stephanie Oh');
+
+      const toLeadership = await rosterPOST(post('/api/admin/roster', {
+        action: 'changeStatus', personId: stephanie.id, to: 'leadership',
+      }));
+      expect(toLeadership.status).toBe(200);
+      const afterLeadership = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      expect(afterLeadership.people.find((p: AdminPerson) => p.id === stephanie.id).status).toBe('leadership');
+      const roles = await db.select().from(personRoles).where(eq(personRoles.personId, stephanie.id));
+      expect(roles).toHaveLength(1);
+      const openMsAsLeader = await db.select().from(memberships)
+        .where(eq(memberships.personId, stephanie.id));
+      expect(openMsAsLeader.every((m) => m.endedAt !== null)).toBe(true); // none open
+
+      const backToMember = await rosterPOST(post('/api/admin/roster', {
+        action: 'changeStatus', personId: stephanie.id, to: 'member',
+      }));
+      expect(backToMember.status).toBe(200);
+      const afterMember = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      expect(afterMember.people.find((p: AdminPerson) => p.id === stephanie.id).status).toBe('member');
+      const rolesAfter = await db.select().from(personRoles).where(eq(personRoles.personId, stephanie.id));
+      expect(rolesAfter).toHaveLength(0);
+    });
+
+    it('double-apply changeStatus (same target twice) is a no-op, not an error', async () => {
+      asAdmin();
+      const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      const jason = roster.people.find((p: AdminPerson) => p.fullName === 'Jason Barrios');
+
+      const first = await rosterPOST(post('/api/admin/roster', {
+        action: 'changeStatus', personId: jason.id, to: 'member',
+      }));
+      expect(first.status).toBe(200);
+      expect(await first.json()).toEqual({ status: 'member', changed: false }); // already a member
+
+      const second = await rosterPOST(post('/api/admin/roster', {
+        action: 'changeStatus', personId: jason.id, to: 'member',
+      }));
+      expect(second.status).toBe(200);
+      expect(await second.json()).toEqual({ status: 'member', changed: false });
+
+      const ms = await db.select().from(memberships).where(eq(memberships.personId, jason.id));
+      expect(ms).toHaveLength(1); // never duplicated
+    });
+
+    it('changing status of a deactivated person returns 400', async () => {
+      asAdmin();
+      const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      const gio = roster.people.find((p: AdminPerson) => p.fullName === 'Gio');
+      await rosterPOST(post('/api/admin/roster', { action: 'deactivate', personId: gio.id }));
+
+      const res = await rosterPOST(post('/api/admin/roster', {
+        action: 'changeStatus', personId: gio.id, to: 'leadership',
+      }));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe('person_deactivated');
+    });
+
+    it('rejects an unknown "to" value with 400 validation error', async () => {
+      asAdmin();
+      const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      const jason = roster.people.find((p: AdminPerson) => p.fullName === 'Jason Barrios');
+      const res = await rosterPOST(post('/api/admin/roster', {
+        action: 'changeStatus', personId: jason.id, to: 'former_member',
+      }));
+      expect(res.status).toBe(400);
+    });
+  });
+
   describe('meetings GET (option B "Meeting list")', () => {
     it('rejects unauthenticated requests with 401', async () => {
       asAnon();
