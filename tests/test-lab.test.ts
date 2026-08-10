@@ -2,7 +2,6 @@
 // route contract. Same requireAdmin-mocking convention as
 // tests/admin-emails.test.ts.
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { eq } from 'drizzle-orm';
 
 vi.mock('@/auth', () => ({ auth: vi.fn() }));
 
@@ -10,7 +9,7 @@ import { auth } from '@/auth';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seed } from '../scripts/seed';
 import { setDb } from '@/lib/db';
-import { emailMessages, meetings } from '@/db/schema';
+import { emailMessages, rsvpTokens } from '@/db/schema';
 import { getOrCreateMeetingFor } from '@/lib/meetings';
 import { registerVisitor } from '@/lib/visitors';
 import { POST as testLabPOST } from '@/app/api/admin/test-lab/route';
@@ -100,14 +99,22 @@ describe('admin test-lab API (app/api/admin/test-lab)', () => {
       expect(body.subject).toContain('CPA');
     });
 
-    it('weekly_report falls back to a fully synthetic sample when there is no current meeting with attendance', async () => {
+    it('weekly_report always renders the fully synthetic sample', async () => {
       const res = await testLabPOST(post({ action: 'preview', kind: 'weekly_report' }));
       const body = await res.json();
       expect(body.html).toContain('Sample Member 01');
       expect(body.html).toContain('18 / 25 active members');
     });
 
-    it('weekly_report reflects the CURRENT real meeting when one exists with attendance, instead of the synthetic sample', async () => {
+    // Regression guard (review fix): weekly_report used to reuse
+    // compileForMeeting for "today's real meeting" when one existed with
+    // attendance, which mints real rsvp_tokens rows for present visitors as
+    // a side effect (see compileForMeeting's own header comment) — a real
+    // write, contradicting the section's on-screen promise that these
+    // actions "never change your data." It must now ALWAYS render the
+    // synthetic sample and NEVER touch rsvp_tokens, even when a real
+    // meeting with real attendance exists for today.
+    it('weekly_report ignores a real meeting with attendance and never writes an rsvp_tokens row', async () => {
       const NOW = new Date('2026-08-12T19:00:00Z'); // Wednesday, 14:00 CT
       vi.useFakeTimers({ toFake: ['Date'], now: NOW });
 
@@ -115,30 +122,21 @@ describe('admin test-lab API (app/api/admin/test-lab)', () => {
         fullName: 'Real Visitor Today', industry: 'Roofing', company: null,
         email: 'real-visitor@example.com', phone: null, clientOpId: 'tl-real-1', now: NOW,
       });
-      const meeting = await getOrCreateMeetingFor(db, NOW);
+      await getOrCreateMeetingFor(db, NOW);
+
+      const tokensBefore = await db.select().from(rsvpTokens);
+      const messagesBefore = await db.select().from(emailMessages);
 
       const res = await testLabPOST(post({ action: 'preview', kind: 'weekly_report' }));
       expect(res.status).toBe(200);
       const body = await res.json();
-      expect(body.html).toContain('Real Visitor Today');
-      expect(body.html).not.toContain('Sample Member 01');
+      expect(body.html).toContain('Sample Member 01'); // synthetic, not the real visitor
+      expect(body.html).not.toContain('Real Visitor Today');
 
-      // Reading the real meeting's data (via compileForMeeting) never
-      // writes an email_messages row of its own.
-      const rows = await db.select().from(emailMessages).where(eq(emailMessages.meetingId, meeting.id));
-      expect(rows).toHaveLength(0);
-    });
-
-    it('weekly_report ignores a canceled "today" meeting and falls back to the synthetic sample', async () => {
-      const NOW = new Date('2026-08-12T19:00:00Z');
-      vi.useFakeTimers({ toFake: ['Date'], now: NOW });
-      await db.insert(meetings).values({
-        meetingDate: '2026-08-12', startsAt: new Date('2026-08-12T20:30:00Z'), status: 'canceled',
-      });
-
-      const res = await testLabPOST(post({ action: 'preview', kind: 'weekly_report' }));
-      const body = await res.json();
-      expect(body.html).toContain('Sample Member 01');
+      const tokensAfter = await db.select().from(rsvpTokens);
+      const messagesAfter = await db.select().from(emailMessages);
+      expect(tokensAfter).toHaveLength(tokensBefore.length); // no rsvp_tokens minted
+      expect(messagesAfter).toHaveLength(messagesBefore.length); // no email_messages written
     });
 
     it('rsvp_page never touches the database and renders a sample confirmation page', async () => {
@@ -196,6 +194,27 @@ describe('admin test-lab API (app/api/admin/test-lab)', () => {
       const before = await db.select().from(emailMessages);
       await testLabPOST(post({ action: 'send', kind: 'weekly_report' }));
       const after = await db.select().from(emailMessages);
+      expect(after).toHaveLength(before.length);
+    });
+
+    // Regression guard (review fix), mirroring the email_messages
+    // zero-write assertion above — a weekly_report SEND must be just as
+    // zero-write as its preview: no rsvp_tokens row, even with a real
+    // meeting/attendance/visitor on the books for today.
+    it('creates no rsvp_tokens row for a weekly_report test send, even with a real meeting on the books', async () => {
+      const NOW = new Date('2026-08-12T19:00:00Z');
+      vi.useFakeTimers({ toFake: ['Date'], now: NOW });
+      await registerVisitor(db, {
+        fullName: 'Real Visitor Today', industry: 'Roofing', company: null,
+        email: 'real-visitor-2@example.com', phone: null, clientOpId: 'tl-real-send-1', now: NOW,
+      });
+      await getOrCreateMeetingFor(db, NOW);
+
+      vi.stubGlobal('fetch', mockFetchOk());
+      const before = await db.select().from(rsvpTokens);
+      const res = await testLabPOST(post({ action: 'send', kind: 'weekly_report' }));
+      expect(res.status).toBe(200);
+      const after = await db.select().from(rsvpTokens);
       expect(after).toHaveLength(before.length);
     });
 

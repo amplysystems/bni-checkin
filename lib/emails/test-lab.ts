@@ -2,27 +2,27 @@
 // send THEMSELVES a real copy of every outbound template, using obviously-
 // fake SAMPLE data, completely isolated from the production pipeline: no
 // email_messages row is ever created here, nothing here touches
-// attendance/visitors/meetings, nothing here increments anything, nothing
-// here notifies leadership. app/api/admin/test-lab/route.ts is the thin
-// auth+dispatch wrapper around this module, same layering as
-// lib/emails/compile.ts + lib/emails/engine.ts for the real pipeline.
+// attendance/visitors/meetings/rsvp_tokens, nothing here increments
+// anything, nothing here notifies leadership. app/api/admin/test-lab/
+// route.ts is the thin auth+dispatch wrapper around this module, same
+// layering as lib/emails/compile.ts + lib/emails/engine.ts for the real
+// pipeline.
 //
-// weekly_report is the one kind that touches the database at all, and even
-// then only to read + (for a meeting that actually has attendance today)
-// reuse compileForMeeting — which is itself read-only except for its
-// idempotent getOrCreateRsvpToken upserts on visitor drafts (see that
-// function's own header comment). app/api/admin/emails' existing 'preview'
-// action already accepts that exact same tradeoff for the exact same
-// reason ("preview never sends anything," not "preview never touches the
-// database") — this reuses the precedent rather than re-litigating it.
-// Nothing here ever calls createDrafts, so email_messages is never written.
-// The other three kinds (thankyou_v1, thankyou_v2, rsvp_page) touch nothing
-// at all — pure string-building from the SAMPLE constants below.
+// TRULY ZERO-WRITE (review fix): weekly_report ALWAYS renders
+// syntheticReportData() below — it never reads or compiles a real meeting,
+// on purpose. An earlier version reused compileForMeeting for "today's real
+// meeting" when one existed, but compileForMeeting mints real rsvp_tokens
+// rows as a side effect for present visitors (see that function's own
+// header comment) — a real write, which contradicts this section's
+// on-screen promise that these actions "never change your data." The
+// existing Emails-panel Preview button already covers "show me the real
+// current compile" (app/api/admin/emails' own 'preview' action, which
+// explicitly accepts that same rsvp_tokens tradeoff for a DIFFERENT,
+// non-sandboxed feature) — Test Lab's whole reason for being is a clean
+// sample that touches nothing, so it doesn't need to duplicate that path.
+// Every kind here is now pure string-building from the SAMPLE constants
+// below; none of the four ever touches the database.
 
-import { findMeetingByDate, meetingHasAttendance } from '@/lib/meetings';
-import { chicagoDateString } from '@/lib/time';
-import type { Db } from '@/lib/db';
-import { compileForMeeting, type LeadershipReportDraft } from './compile';
 import { siteUrl } from './constants';
 import { visitorThankyouSubject, visitorThankyouHtml, visitorThankyouText, VENUE_LINE_1, VENUE_LINE_2, MEETING_LINE } from '@/emails/visitor-thankyou';
 import { visitorConversionSubject, visitorConversionHtml, visitorConversionText } from '@/emails/visitor-conversion';
@@ -83,12 +83,12 @@ function sampleMemberNames(count: number): string[] {
   return Array.from({ length: count }, (_, i) => `Sample Member ${String(i + 1).padStart(2, '0')}`);
 }
 
-// Fully synthetic weekly-report sample — used whenever there's no current
-// real meeting with attendance to preview instead (a bare/empty database,
-// or simply not meeting day). Numbers are the spec's own: 18 members
-// present (== activeMemberCount, so "road to 25" reads 18/25 with nobody
-// absent), 3 visitors (one with no email on file, to also exercise that
-// branch of the template), and a 6-week upward trend.
+// Fully synthetic weekly-report sample — the ONLY thing weekly_report ever
+// renders (see this module's header for why it never reads a real
+// meeting). Numbers are the spec's own: 18 members present (==
+// activeMemberCount, so "road to 25" reads 18/25 with nobody absent), 3
+// visitors (one with no email on file, to also exercise that branch of the
+// template), and a 6-week upward trend.
 function syntheticReportData(): LeadershipReportData {
   return {
     meetingDateLabel: 'Sample data — no real meeting yet',
@@ -124,24 +124,7 @@ function syntheticReportData(): LeadershipReportData {
   };
 }
 
-// "Current real meeting" = today's meeting (Chicago date), if one exists,
-// isn't canceled, and has at least one non-voided check-in — the exact
-// same gate app/api/admin/emails' compile action and the cron tick both
-// apply before treating a meeting as real/compilable (see that route's own
-// CRITICAL comment for why both checks matter).
-async function currentMeetingWithAttendance(db: Db, now: Date) {
-  const meeting = await findMeetingByDate(db, chicagoDateString(now));
-  if (!meeting || meeting.status === 'canceled') return null;
-  return (await meetingHasAttendance(db, meeting.id)) ? meeting : null;
-}
-
-async function weeklyReportContent(db: Db, now: Date): Promise<TestLabContent> {
-  const meeting = await currentMeetingWithAttendance(db, now);
-  if (meeting) {
-    const { drafts } = await compileForMeeting(db, meeting.id);
-    const report = drafts.find((d): d is LeadershipReportDraft => d.type === 'leadership_report')!;
-    return { subject: report.subject, html: report.html, text: report.text };
-  }
+function weeklyReportContent(): TestLabContent {
   const data = syntheticReportData();
   return {
     subject: leadershipReportSubject(data.meetingDateLabel),
@@ -176,11 +159,15 @@ function rsvpPagePreviewHtml(): string {
 </html>`;
 }
 
-export async function buildTestLabContent(db: Db, kind: TestLabKind, now: Date = new Date()): Promise<TestLabContent> {
+// Async only for interface stability with its one call site
+// (app/api/admin/test-lab/route.ts awaits this) — every branch below is
+// actually synchronous now that weekly_report no longer touches the
+// database; nothing in this module ever performs a DB read or write.
+export async function buildTestLabContent(kind: TestLabKind): Promise<TestLabContent> {
   switch (kind) {
     case 'thankyou_v1': return thankyouV1Content();
     case 'thankyou_v2': return thankyouV2Content();
-    case 'weekly_report': return weeklyReportContent(db, now);
+    case 'weekly_report': return weeklyReportContent();
     case 'rsvp_page': return { subject: 'RSVP page preview', html: rsvpPagePreviewHtml(), text: '' };
     default: {
       const _exhaustive: never = kind;

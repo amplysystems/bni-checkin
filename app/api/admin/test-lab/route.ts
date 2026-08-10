@@ -36,23 +36,26 @@ export async function POST(req: Request) {
   const parsed = Body.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return Response.json({ error: 'Invalid request' }, { status: 400 });
   const d = parsed.data;
-  const db = getDb();
 
-  // Preview never sends anything and never checks the rate limit — it's
-  // read-mostly (see lib/emails/test-lab.ts's own header for the one
-  // read-only-ish exception) and costs nothing to click repeatedly.
+  // Preview never sends anything, never touches the database (see
+  // lib/emails/test-lab.ts's own header — every kind is now pure
+  // string-building), and never checks the rate limit — free to click
+  // repeatedly.
   if (d.action === 'preview') {
-    const { subject, html } = await buildTestLabContent(db, d.kind);
+    const { subject, html } = await buildTestLabContent(d.kind);
     return Response.json({ subject, html });
   }
 
   // action === 'send': rate-limited BEFORE building or sending anything —
   // same cheapest-check-first ordering as every kiosk POST route (see e.g.
-  // app/api/kiosk/checkin/route.ts).
+  // app/api/kiosk/checkin/route.ts). getDb() is only needed for this
+  // check — buildTestLabContent below no longer touches the database at
+  // all.
+  const db = getDb();
   const { allowed } = await checkRateLimit(db, { ip: getClientIp(req), ...TEST_EMAIL_RATE_LIMIT });
   if (!allowed) return Response.json({ error: 'rate_limited' }, { status: 429 });
 
-  const { subject, html, text } = await buildTestLabContent(db, d.kind);
+  const { subject, html, text } = await buildTestLabContent(d.kind);
   await sendTestEmail({ to: guard.email, subject, html, text });
   return Response.json({ sent: true });
 }
