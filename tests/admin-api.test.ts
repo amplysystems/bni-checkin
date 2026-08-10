@@ -26,9 +26,13 @@ function post(url: string, body: unknown) {
   });
 }
 
+function get(url: string) {
+  return new Request(`http://admin.test${url}`);
+}
+
 type AdminPerson = {
   id: string; fullName: string; email: string | null; phone: string | null;
-  industry: string | null; company: string | null;
+  industry: string | null; company: string | null; deactivatedAt: string | null;
 };
 
 describe('admin API', () => {
@@ -189,5 +193,26 @@ describe('admin API', () => {
     expect(reactivateRes.status).toBe(200);
     const after = await (await rosterGET()).json();
     expect(after.people.map((p: AdminPerson) => p.id)).toContain(gio.id);
+  });
+
+  it('includeDeactivated=1 includes deactivated people; reactivate restores them to the default listing', async () => {
+    asAdmin();
+    const roster = await (await rosterGET()).json();
+    const gio = roster.people.find((p: AdminPerson) => p.fullName === 'Gio');
+    await rosterPOST(post('/api/admin/roster', { action: 'deactivate', personId: gio.id }));
+
+    const defaultListing = await (await rosterGET()).json();
+    expect(defaultListing.people.map((p: AdminPerson) => p.id)).not.toContain(gio.id);
+
+    const withDeactivated = await (await rosterGET(get('/api/admin/roster?includeDeactivated=1'))).json();
+    const gioIncluded = withDeactivated.people.find((p: AdminPerson) => p.id === gio.id);
+    expect(gioIncluded).toBeTruthy();
+    expect(gioIncluded.deactivatedAt).toBeTruthy();
+
+    await rosterPOST(post('/api/admin/roster', { action: 'reactivate', personId: gio.id }));
+    const restored = await (await rosterGET()).json();
+    const gioRestored = restored.people.find((p: AdminPerson) => p.id === gio.id);
+    expect(gioRestored).toBeTruthy();
+    expect(gioRestored.deactivatedAt).toBeNull();
   });
 });

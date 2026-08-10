@@ -81,6 +81,15 @@ const SEARCH_DEBOUNCE_MS = 250;
 // literal Tailwind class.
 const BRAND_RED = '#CF2030';
 
+// #CF2030 as TEXT (not background) fails WCAG on dark surfaces — measured
+// ~3.68:1 on the splash screen's dark background, short of the 4.5:1 minimum
+// for normal text. Inline `style` can't express a `dark:` variant, so red
+// text uses this literal Tailwind arbitrary-value pair instead (#F0595F
+// computes to ~5.4-5.9:1 against neutral-900/950). Written as a literal
+// string, not built from BRAND_RED above, because Tailwind's build-time
+// scanner only sees raw source text, not evaluated JS.
+const RED_TEXT_CLASS = 'text-[#CF2030] dark:text-[#F0595F]';
+
 // Shared by every visitor-form text input; only the border reacts to
 // validation state, via VISITOR_INPUT_ERROR_STYLE below.
 const VISITOR_INPUT_CLASS =
@@ -651,8 +660,7 @@ function SplashView({ info, undoing, onUndo }: { info: SplashInfo; undoing: bool
         type="button"
         onClick={onUndo}
         disabled={undoing}
-        style={{ color: BRAND_RED }}
-        className="mt-6 flex min-h-[56px] items-center justify-center px-6 text-sm font-medium transition active:scale-[0.98] disabled:opacity-50"
+        className={`mt-6 flex min-h-[56px] items-center justify-center px-6 text-sm font-medium transition active:scale-[0.98] disabled:opacity-50 ${RED_TEXT_CLASS}`}
       >
         Not you? Undo
       </button>

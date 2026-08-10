@@ -4,11 +4,17 @@ import { getDb } from '@/lib/db';
 import { people, memberships, personRoles } from '@/db/schema';
 import { requireAdmin } from '@/lib/admin-guard';
 
-export async function GET() {
+// req is optional so every existing test call site that invokes GET() with
+// no arguments keeps working — only the new ?includeDeactivated=1 path needs
+// a real Request to read query params from. Next.js itself always passes one.
+export async function GET(req?: Request) {
   const guard = await requireAdmin();
   if (guard instanceof Response) return guard;
   const db = getDb();
-  const rows = await db.select().from(people).where(isNull(people.deactivatedAt));
+  const includeDeactivated = req ? new URL(req.url).searchParams.get('includeDeactivated') === '1' : false;
+  const rows = includeDeactivated
+    ? await db.select().from(people)
+    : await db.select().from(people).where(isNull(people.deactivatedAt));
 
   // status is derived, not stored on `people`: leadership (person_roles) wins
   // over an open membership's status, which wins over 'none' (no role, no

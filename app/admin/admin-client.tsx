@@ -51,7 +51,12 @@ const emptyForm: PersonFormState = {
 
 type DialogState = { mode: 'create' } | { mode: 'edit'; person: AdminPerson } | null;
 
+type LoadResult =
+  | { ok: true; people: AdminPerson[]; attendance: AttendanceRow[]; meetingDate: string }
+  | { ok: false };
+
 const GENERIC_ERROR = 'Something went wrong — try again.';
+const SAVE_CONNECTION_ERROR = "Couldn't save — check the connection and try again.";
 const TOAST_MS = 2_500;
 
 // Brand accent. Kept as a single JS constant for reference, but Tailwind's
@@ -59,19 +64,41 @@ const TOAST_MS = 2_500;
 // scanner — see the equivalent comment in app/kiosk/kiosk-client.tsx. Any
 // usage that needs to react to component state goes through inline `style`
 // referencing this constant; static, always-red usages keep the literal
-// Tailwind class.
+// Tailwind class. This is only safe for BACKGROUND red (white text on top) —
+// it passes contrast in both themes.
 const BRAND_RED = '#CF2030';
+
+// #CF2030 as TEXT (not background) fails WCAG on dark surfaces: measured
+// ~3.3:1 against neutral-900/neutral-950, short of the 4.5:1 minimum for
+// normal text. Inline `style` can't express a `dark:` variant, so red text
+// uses this literal Tailwind arbitrary-value pair instead — computed
+// contrast for #F0595F against both surfaces is ~5.4:1 (neutral-900) and
+// ~5.9:1 (neutral-950). Written as a literal string (not built from the
+// BRAND_RED constant above) because Tailwind's build-time scanner only sees
+// raw source text, not evaluated JS — a template-interpolated class name is
+// invisible to it.
+const RED_TEXT_CLASS = 'text-[#CF2030] dark:text-[#F0595F]';
 
 const ADMIN_INPUT_CLASS =
   'w-full rounded-xl border border-neutral-200 bg-transparent px-4 py-2.5 text-[15px] text-neutral-900 outline-none focus:border-neutral-400 dark:border-neutral-700 dark:text-neutral-100 dark:focus:border-neutral-600';
 
+// 'none' previously used text-neutral-400/500 on a bare dashed border with no
+// fill — measured ~2.5:1 on a white card, well under the 4.5:1 minimum.
+// Given a subtle bg + ring (like the other badges' solid fills) and darker
+// text so it clears contrast in both themes while still reading as visually
+// "lesser than" a real status.
 const STATUS_META: Record<PersonStatus, { label: string; className: string }> = {
   leadership: { label: 'Leadership', className: 'bg-neutral-900 text-white dark:bg-neutral-100 dark:text-neutral-900' },
   member: { label: 'Member', className: 'bg-neutral-100 text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300' },
   visitor: { label: 'Visitor', className: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
   former_member: { label: 'Former member', className: 'border border-dashed border-neutral-300 text-neutral-500 dark:border-neutral-700 dark:text-neutral-400' },
-  none: { label: 'None', className: 'border border-dashed border-neutral-300 text-neutral-400 dark:border-neutral-700 dark:text-neutral-500' },
+  none: { label: 'None', className: 'bg-neutral-50 text-neutral-600 ring-1 ring-inset ring-neutral-300 dark:bg-neutral-800 dark:text-neutral-300 dark:ring-neutral-700' },
 };
+
+// Elements the Tab-trap in PersonDialog cycles between — deliberately not a
+// library, just the standard focusable-selector list.
+const FOCUSABLE_SELECTOR =
+  'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 // ---- Small pure helpers ---------------------------------------------------
 
@@ -153,14 +180,21 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [attendance, setAttendance] = useState<AttendanceRow[] | null>(null);
   const [meetingDate, setMeetingDate] = useState<string | null>(null);
   const [loadError, setLoadError] = useState(false);
+  const [showDeactivated, setShowDeactivated] = useState(false);
 
   const [chipPendingId, setChipPendingId] = useState<string | null>(null);
   const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
+  const [reactivatingId, setReactivatingId] = useState<string | null>(null);
 
   const [dialog, setDialog] = useState<DialogState>(null);
   const [form, setForm] = useState<PersonFormState>(emptyForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
+  // The element that had focus right before a dialog opened (the "+ Add
+  // person" button, a row's "Edit" button, …) — restored on every close path
+  // (Cancel, overlay click, Escape, successful save) so keyboard/AT users
+  // land back where they were instead of at <body>.
+  const previousFocusRef = useRef<HTMLElement | null>(null);
 
   const [toast, setToast] = useState<{ id: number; text: string } | null>(null);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -176,29 +210,55 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   }, []);
 
   // ---- Data loading ----
-  // Both endpoints are fetched together on mount and again after every
-  // mutation (attendance toggle, person save, deactivate) — there's no
-  // polling here (unlike the kiosk), so a simple "fetch both, replace state"
-  // is enough; no request-ordering guard is needed.
+  // Both endpoints are fetched together on mount, whenever the "show
+  // deactivated" toggle changes, and again after every mutation (attendance
+  // toggle, person save, deactivate/reactivate). Those call sites don't
+  // coordinate with each other — a chip tap and a Deactivate click can both
+  // be in flight at once — so a slow response from an earlier request must
+  // never clobber a fresher one. loadRequestIdRef is a monotonic counter
+  // shared by every call: each request stamps its eventual response with the
+  // counter value at issue time, and applyLoadResult discards any response
+  // whose stamp no longer matches the current counter. Ported from the same
+  // pattern in app/kiosk/kiosk-client.tsx.
+  const loadRequestIdRef = useRef(0);
 
-  const loadAll = useCallback(async () => {
+  const fetchAdminData = useCallback(async (includeDeactivated: boolean): Promise<LoadResult> => {
     try {
+      const rosterUrl = includeDeactivated ? '/api/admin/roster?includeDeactivated=1' : '/api/admin/roster';
       const [rosterRes, attRes] = await Promise.all([
-        fetch('/api/admin/roster'),
+        fetch(rosterUrl),
         fetch('/api/admin/attendance'),
       ]);
-      if (!rosterRes.ok || !attRes.ok) { setLoadError(true); return; }
+      if (!rosterRes.ok || !attRes.ok) return { ok: false };
       const rosterData = (await rosterRes.json()) as RosterResponse;
       const attData = (await attRes.json()) as AttendanceResponse;
-      setPeople(rosterData.people);
-      setAttendance(attData.attendance);
-      setMeetingDate(attData.meetingDate);
-      setLoadError(false);
+      return { ok: true, people: rosterData.people, attendance: attData.attendance, meetingDate: attData.meetingDate };
     } catch {
+      return { ok: false };
+    }
+  }, []);
+
+  const applyLoadResult = useCallback((requestId: number, result: LoadResult) => {
+    if (requestId !== loadRequestIdRef.current) return; // superseded by a newer request
+    if (result.ok) {
+      setPeople(result.people);
+      setAttendance(result.attendance);
+      setMeetingDate(result.meetingDate);
+      setLoadError(false);
+    } else {
       setLoadError(true);
     }
   }, []);
 
+  const loadAll = useCallback(async () => {
+    const requestId = ++loadRequestIdRef.current;
+    const result = await fetchAdminData(showDeactivated);
+    applyLoadResult(requestId, result);
+  }, [fetchAdminData, applyLoadResult, showDeactivated]);
+
+  // Re-runs on mount and whenever loadAll's identity changes — which happens
+  // whenever showDeactivated changes, so toggling "Show deactivated" refetches
+  // with the right query param automatically.
   useEffect(() => {
     async function run() { await loadAll(); }
     run();
@@ -208,6 +268,11 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     () => new Map((attendance ?? []).map((a) => [a.personId, a])),
     [attendance],
   );
+
+  // Deactivated people can never have a today's-attendance row going forward
+  // (the API rejects check-ins for them), so the Today grid only ever shows
+  // active people regardless of the roster panel's "show deactivated" toggle.
+  const activePeople = useMemo(() => (people ?? []).filter((p) => p.deactivatedAt === null), [people]);
 
   // ---- Today panel: toggle check-in ----
 
@@ -228,18 +293,21 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
       loadAll(); // state may be stale (e.g. someone else already voided it) — resync either way
       return;
     }
+    showToast(existing ? 'Removed from today' : 'Checked in');
     loadAll();
   }, [chipPendingId, attendanceByPerson, showToast, loadAll]);
 
-  // ---- Roster panel: create / edit / deactivate ----
+  // ---- Roster panel: create / edit / deactivate / reactivate ----
 
   const openCreateDialog = useCallback(() => {
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
     setForm(emptyForm);
     setFormError(null);
     setDialog({ mode: 'create' });
   }, []);
 
   const openEditDialog = useCallback((person: AdminPerson) => {
+    previousFocusRef.current = document.activeElement as HTMLElement | null;
     setForm({
       fullName: person.fullName,
       industry: person.industry ?? '',
@@ -256,6 +324,8 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     if (saving) return;
     setDialog(null);
     setFormError(null);
+    previousFocusRef.current?.focus();
+    previousFocusRef.current = null;
   }, [saving]);
 
   useEffect(() => {
@@ -287,15 +357,22 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
 
     setSaving(false);
     if (!result.ok) {
+      // 400 = validation the user can fix (highlighted fields). Anything
+      // else (network drop, 500, …) isn't the user's fault and a toast alone
+      // could be missed while heads-down in the dialog — surface it inline
+      // too, and leave the dialog open with whatever was typed intact.
       if (result.status === 400) {
         setFormError('Check the highlighted fields and try again.');
       } else {
+        setFormError(SAVE_CONNECTION_ERROR);
         showToast(GENERIC_ERROR);
       }
       return;
     }
     setDialog(null);
     showToast(dialog.mode === 'create' ? 'Person added' : 'Changes saved');
+    previousFocusRef.current?.focus();
+    previousFocusRef.current = null;
     loadAll();
   }, [dialog, saving, form, showToast, loadAll]);
 
@@ -317,6 +394,21 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     showToast(`${person.fullName} deactivated`);
     loadAll();
   }, [deactivatingId, showToast, loadAll]);
+
+  const handleReactivate = useCallback(async (person: AdminPerson) => {
+    if (reactivatingId) return;
+    setReactivatingId(person.id);
+    const result = await postJson<{ person: AdminPerson }>('/api/admin/roster', {
+      action: 'reactivate', personId: person.id,
+    });
+    setReactivatingId(null);
+    if (!result.ok) {
+      showToast(GENERIC_ERROR);
+      return;
+    }
+    showToast(`${person.fullName} reactivated`);
+    loadAll();
+  }, [reactivatingId, showToast, loadAll]);
 
   // ---- Render ----
 
@@ -353,17 +445,21 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
           {!loadError && people !== null && attendance !== null && (
             <>
               <TodayPanel
-                people={people}
+                people={activePeople}
                 attendanceByPerson={attendanceByPerson}
                 pendingId={chipPendingId}
                 onToggle={toggleAttendance}
               />
               <RosterPanel
                 people={people}
+                showDeactivated={showDeactivated}
+                onToggleShowDeactivated={setShowDeactivated}
                 deactivatingId={deactivatingId}
+                reactivatingId={reactivatingId}
                 onAdd={openCreateDialog}
                 onEdit={openEditDialog}
                 onDeactivate={handleDeactivate}
+                onReactivate={handleReactivate}
               />
             </>
           )}
@@ -472,13 +568,17 @@ function TodayChip({
 // ---- Roster panel ----------------------------------------------------------
 
 function RosterPanel({
-  people, deactivatingId, onAdd, onEdit, onDeactivate,
+  people, showDeactivated, onToggleShowDeactivated, deactivatingId, reactivatingId, onAdd, onEdit, onDeactivate, onReactivate,
 }: {
   people: AdminPerson[];
+  showDeactivated: boolean;
+  onToggleShowDeactivated: (v: boolean) => void;
   deactivatingId: string | null;
+  reactivatingId: string | null;
   onAdd: () => void;
   onEdit: (person: AdminPerson) => void;
   onDeactivate: (person: AdminPerson) => void;
+  onReactivate: (person: AdminPerson) => void;
 }) {
   const sorted = useMemo(
     () => [...people].sort((a, b) => a.fullName.localeCompare(b.fullName)),
@@ -489,14 +589,25 @@ function RosterPanel({
     <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm dark:bg-neutral-900">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">Roster</h2>
-        <button
-          type="button"
-          onClick={onAdd}
-          style={{ backgroundColor: BRAND_RED }}
-          className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition active:scale-[0.98]"
-        >
-          + Add person
-        </button>
+        <div className="flex items-center gap-4">
+          <label className="flex items-center gap-2 text-sm text-neutral-600 dark:text-neutral-300">
+            <input
+              type="checkbox"
+              checked={showDeactivated}
+              onChange={(e) => onToggleShowDeactivated(e.target.checked)}
+              className="h-4 w-4 rounded border-neutral-300 dark:border-neutral-600"
+            />
+            Show deactivated
+          </label>
+          <button
+            type="button"
+            onClick={onAdd}
+            style={{ backgroundColor: BRAND_RED }}
+            className="rounded-xl px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition active:scale-[0.98]"
+          >
+            + Add person
+          </button>
+        </div>
       </div>
 
       {sorted.length === 0 ? (
@@ -519,8 +630,10 @@ function RosterPanel({
                   key={p.id}
                   person={p}
                   deactivating={deactivatingId === p.id}
+                  reactivating={reactivatingId === p.id}
                   onEdit={() => onEdit(p)}
                   onDeactivate={() => onDeactivate(p)}
+                  onReactivate={() => onReactivate(p)}
                 />
               ))}
             </tbody>
@@ -532,16 +645,19 @@ function RosterPanel({
 }
 
 function RosterRow({
-  person, deactivating, onEdit, onDeactivate,
+  person, deactivating, reactivating, onEdit, onDeactivate, onReactivate,
 }: {
   person: AdminPerson;
   deactivating: boolean;
+  reactivating: boolean;
   onEdit: () => void;
   onDeactivate: () => void;
+  onReactivate: () => void;
 }) {
   const meta = STATUS_META[person.status];
+  const deactivated = person.deactivatedAt !== null;
   return (
-    <tr className="border-t border-neutral-100 dark:border-neutral-800">
+    <tr className={`border-t border-neutral-100 dark:border-neutral-800 ${deactivated ? 'opacity-60' : ''}`}>
       <td className="px-3 py-3 text-sm font-medium text-neutral-900 dark:text-neutral-50">{person.fullName}</td>
       <td className="px-3 py-3 text-sm text-neutral-600 dark:text-neutral-400">{person.industry ?? '—'}</td>
       <td className="px-3 py-3 text-sm text-neutral-600 dark:text-neutral-400">{person.email ?? '—'}</td>
@@ -551,23 +667,35 @@ function RosterRow({
         </span>
       </td>
       <td className="px-3 py-3 text-right text-sm">
-        <button
-          type="button"
-          onClick={onEdit}
-          disabled={deactivating}
-          className="mr-4 font-medium text-neutral-600 transition hover:underline disabled:opacity-50 dark:text-neutral-300"
-        >
-          Edit
-        </button>
-        <button
-          type="button"
-          onClick={onDeactivate}
-          disabled={deactivating}
-          style={{ color: BRAND_RED }}
-          className="font-medium transition hover:underline disabled:opacity-50"
-        >
-          {deactivating ? 'Deactivating…' : 'Deactivate'}
-        </button>
+        {deactivated ? (
+          <button
+            type="button"
+            onClick={onReactivate}
+            disabled={reactivating}
+            className="font-medium text-neutral-600 transition hover:underline disabled:opacity-50 dark:text-neutral-300"
+          >
+            {reactivating ? 'Reactivating…' : 'Reactivate'}
+          </button>
+        ) : (
+          <>
+            <button
+              type="button"
+              onClick={onEdit}
+              disabled={deactivating}
+              className="mr-4 font-medium text-neutral-600 transition hover:underline disabled:opacity-50 dark:text-neutral-300"
+            >
+              Edit
+            </button>
+            <button
+              type="button"
+              onClick={onDeactivate}
+              disabled={deactivating}
+              className={`font-medium transition hover:underline disabled:opacity-50 ${RED_TEXT_CLASS}`}
+            >
+              {deactivating ? 'Deactivating…' : 'Deactivate'}
+            </button>
+          </>
+        )}
       </td>
     </tr>
   );
@@ -587,12 +715,50 @@ function PersonDialog({
   onSave: () => void;
   onClose: () => void;
 }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  // Focus trap: Tab/Shift+Tab cycle between the dialog's first and last
+  // focusable elements instead of escaping into the page behind the overlay.
+  // No library — just the standard "collect focusables, wrap at the ends"
+  // pattern, scoped to this dialog's own container so it mounts/unmounts
+  // with it automatically.
+  useEffect(() => {
+    const container = dialogRef.current;
+    if (!container) return;
+
+    function focusableElements(): HTMLElement[] {
+      return Array.from(container!.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Tab') return;
+      const focusable = focusableElements();
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+        if (active === first || !container!.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !container!.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+
+    container.addEventListener('keydown', onKeyDown);
+    return () => container.removeEventListener('keydown', onKeyDown);
+  }, []);
+
   return (
     <div
       className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
       onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
     >
       <div
+        ref={dialogRef}
         role="dialog"
         aria-modal="true"
         aria-labelledby="person-dialog-title"
@@ -603,7 +769,7 @@ function PersonDialog({
         </h2>
 
         {error && (
-          <div style={{ color: BRAND_RED }} className="mt-3 rounded-xl bg-red-50 px-4 py-3 text-sm dark:bg-red-950/40">
+          <div className={`mt-3 rounded-xl bg-red-50 px-4 py-3 text-sm dark:bg-red-950/40 ${RED_TEXT_CLASS}`}>
             {error}
           </div>
         )}
