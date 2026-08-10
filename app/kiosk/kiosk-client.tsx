@@ -68,7 +68,7 @@ const VOIDED_MESSAGE = 'Check-in was undone earlier — see an organizer';
 // Timing knobs, named so the setTimeout/setInterval calls below read as
 // intent rather than magic numbers.
 const POLL_INTERVAL_MS = 30_000;
-const SPLASH_MS = 5_000;
+const SPLASH_MS = 3_000;
 const TOAST_MS = 2_500;
 const SEARCH_DEBOUNCE_MS = 250;
 const IDLE_MS = 45_000;
@@ -800,6 +800,7 @@ export default function KioskClient() {
           info={splash}
           undoing={undoing}
           onUndo={() => performUndo(splash.attendanceId)}
+          onDismiss={resetToGrid}
           adSrc={dailyAdSrc}
         />
       )}
@@ -959,11 +960,12 @@ function MemberCard({ member, pending, onTap }: { member: Member; pending: boole
 // ---- Splash view ----------------------------------------------------------
 
 function SplashView({
-  info, undoing, onUndo, adSrc,
+  info, undoing, onUndo, onDismiss, adSrc,
 }: {
   info: SplashInfo;
   undoing: boolean;
   onUndo: () => void;
+  onDismiss: () => void;
   adSrc: string;
 }) {
   // React's `autoFocus` prop only triggers an implicit .focus() call for a
@@ -977,7 +979,14 @@ function SplashView({
   }, []);
 
   return (
-    <main className="relative flex flex-1 flex-col items-center justify-center overflow-hidden px-6 text-center">
+    // Tap-anywhere-to-continue: the whole splash dismisses on click/Enter/
+    // Escape (the undo Button stops propagation so undoing never also
+    // dismisses-and-races). The auto-return timer still runs as a fallback.
+    <main
+      onClick={onDismiss}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === 'Escape') onDismiss(); }}
+      className="relative flex flex-1 flex-col items-center justify-center overflow-hidden px-6 text-center"
+    >
       {/* Day's ad as a full-bleed backdrop, darkened with a scrim underneath
           so the confirmation text stays legible regardless of the theme or
           what's in the photo — see dayOfYear()'s comment for the selection
@@ -1036,12 +1045,13 @@ function SplashView({
           variant="ghost"
           tone="brand"
           size="touch"
-          onClick={onUndo}
+          onClick={(e) => { e.stopPropagation(); onUndo(); }}
           disabled={undoing}
           className="mt-6 !text-[#F0595F] !bg-neutral-950/90 rounded-xl !px-5"
         >
           Not you? Undo
         </Button>
+        <p className="mt-4 text-sm text-neutral-300">Tap anywhere to continue</p>
       </div>
     </main>
   );
