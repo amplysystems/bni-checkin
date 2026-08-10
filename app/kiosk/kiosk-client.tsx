@@ -858,13 +858,17 @@ function SplashView({
             non-important override isn't reliably ordered ahead of the
             component's own class in Tailwind's generated stylesheet (see
             components/ui/button.tsx's docblock). */}
+        {/* Solid backing chip: contrast is computed against the chip surface,
+            not the rotating ad photo behind it — photo-independent AA
+            (#F0595F on neutral-950 ≈ 6.0:1) and future-proof against new
+            creatives. */}
         <Button
           variant="ghost"
           tone="brand"
           size="touch"
           onClick={onUndo}
           disabled={undoing}
-          className="mt-6 !text-[#F0595F]"
+          className="mt-6 !text-[#F0595F] !bg-neutral-950/90 rounded-xl !px-5"
         >
           Not you? Undo
         </Button>
