@@ -420,6 +420,12 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
           </span>
         </div>
         <div className="flex items-center gap-3 text-sm text-neutral-500 dark:text-neutral-400">
+          <a
+            href="/kiosk"
+            className="min-h-[44px] inline-flex items-center rounded-full border border-neutral-300 px-4 font-medium text-neutral-700 hover:bg-white dark:border-neutral-700 dark:text-neutral-300 dark:hover:bg-neutral-900"
+          >
+            View kiosk
+          </a>
           <span>{adminEmail}</span>
           {meetingDate && (
             <span className="rounded-full bg-white px-3.5 py-1.5 font-medium text-neutral-600 shadow-sm dark:bg-neutral-900 dark:text-neutral-300">
