@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore, type ReactNode } from 'react';
 import Image from 'next/image';
 import { Button } from '@/components/ui/button';
 
@@ -46,7 +46,7 @@ type VisitorApiResponse =
 
 type ReturningApiResponse = { results: SuggestionPerson[] };
 
-type View = 'grid' | 'splash' | 'visitorForm' | 'returningSearch';
+type View = 'grid' | 'splash' | 'visitorForm' | 'returningSearch' | 'attract';
 
 type SplashInfo = { fullName: string; attendanceId: string; checkedInAt: string };
 
@@ -71,6 +71,41 @@ const POLL_INTERVAL_MS = 30_000;
 const SPLASH_MS = 5_000;
 const TOAST_MS = 2_500;
 const SEARCH_DEBOUNCE_MS = 250;
+const IDLE_MS = 45_000;
+const CROSSFADE_MS = 8_000;
+
+// The four ad creatives (see public/ads/) — shared by the attract loop
+// slideshow, the login split layout, and the splash backdrop.
+const ADS = ['/ads/hero.png', '/ads/deserves.png', '/ads/building.png', '/ads/ask.png'] as const;
+
+// Used to pick "the day's ad" for the splash backdrop — deterministic per
+// day (not per render), so it doesn't flicker between different check-ins
+// on the same day, and rotates on its own as days pass without needing a
+// stored index anywhere.
+function dayOfYear(date: Date): number {
+  const start = Date.UTC(date.getUTCFullYear(), 0, 0);
+  const diff = Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()) - start;
+  return Math.floor(diff / 86_400_000);
+}
+
+// AttractView's prefers-reduced-motion check, via useSyncExternalStore
+// rather than the more familiar "useState + read-in-a-mount-effect"
+// pattern — the latter calls setState synchronously on every mount to sync
+// from an external source (the MediaQueryList), which is exactly the
+// footgun useSyncExternalStore exists to replace (safe under concurrent
+// rendering, and no SSR/hydration mismatch since getServerSnapshot below
+// gives a fixed, non-throwing value before window exists).
+function subscribeReducedMotion(onChange: () => void): () => void {
+  const mq = window.matchMedia('(prefers-reduced-motion: reduce)');
+  mq.addEventListener('change', onChange);
+  return () => mq.removeEventListener('change', onChange);
+}
+function getReducedMotionSnapshot(): boolean {
+  return window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+}
+function getReducedMotionServerSnapshot(): boolean {
+  return false; // no window server-side; client re-syncs the real value immediately after hydration
+}
 
 // Brand accent. Kept as a single JS constant for reference, but Tailwind's
 // arbitrary-value classes (bg-[#CF2030] etc.) must stay literal strings for
@@ -169,6 +204,73 @@ function AmplyFooter() {
   );
 }
 
+// ---- Attract loop -----------------------------------------------------
+
+// Entered after IDLE_MS of no interaction on the grid (see KioskClient's
+// idle-timer effect). Deliberately a single plain <button> covering the
+// screen rather than a modal/dialog — no role="dialog", no focus trap, no
+// captured Tab order. That's the whole point: it must never interfere with
+// Guided Access or leave a keyboard/AT user stuck. Any pointerdown or
+// keydown anywhere on it exits back to the grid.
+function AttractView({ startIndex, onExit }: { startIndex: number; onExit: () => void }) {
+  const reducedMotion = useSyncExternalStore(
+    subscribeReducedMotion,
+    getReducedMotionSnapshot,
+    getReducedMotionServerSnapshot,
+  );
+  const [activeIndex, setActiveIndex] = useState(startIndex % ADS.length);
+
+  // Advances the slideshow every CROSSFADE_MS. Skipped entirely under
+  // reduced motion — that branch below renders one static image (still
+  // "rotated" per entry via startIndex) and never advances it.
+  useEffect(() => {
+    if (reducedMotion) return;
+    const id = setInterval(() => {
+      setActiveIndex((i) => (i + 1) % ADS.length);
+    }, CROSSFADE_MS);
+    return () => clearInterval(id);
+  }, [reducedMotion]);
+
+  return (
+    <button
+      type="button"
+      onPointerDown={onExit}
+      onKeyDown={onExit}
+      aria-label="Tap anywhere to check in"
+      className="fixed inset-0 z-40 h-screen w-screen overflow-hidden bg-black text-left"
+    >
+      {reducedMotion ? (
+        <Image
+          src={ADS[activeIndex]}
+          alt=""
+          fill
+          priority
+          sizes="100vw"
+          className="object-cover"
+        />
+      ) : (
+        ADS.map((src, i) => (
+          <Image
+            key={src}
+            src={src}
+            alt=""
+            fill
+            priority={i === startIndex % ADS.length}
+            sizes="100vw"
+            className={`object-cover transition-opacity duration-[1500ms] ease-in-out ${
+              i === activeIndex ? 'opacity-100' : 'opacity-0'
+            }`}
+          />
+        ))
+      )}
+      <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
+      <p className="absolute inset-x-0 bottom-8 text-center text-sm font-medium text-white">
+        Tap anywhere to check in
+      </p>
+    </button>
+  );
+}
+
 // ---- Root component -----------------------------------------------------
 
 export default function KioskClient() {
@@ -179,6 +281,59 @@ export default function KioskClient() {
   const [pendingId, setPendingId] = useState<string | null>(null);
   const [splash, setSplash] = useState<SplashInfo | null>(null);
   const [undoing, setUndoing] = useState(false);
+
+  // The day's ad for the splash backdrop — computed once per mount (a kiosk
+  // session spans a single meeting, not multiple days) rather than on every
+  // render.
+  const dailyAdSrc = useMemo(() => ADS[dayOfYear(new Date()) % ADS.length], []);
+
+  // Root container ref: the idle-reset listeners below attach here (not
+  // window) per spec, and it doubles as the attract loop's full-bleed
+  // backdrop container.
+  const rootRef = useRef<HTMLDivElement>(null);
+  const idleTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Increments every time the kiosk goes idle into the attract loop, so each
+  // entry starts on a different ad ("rotate choice per entry") without
+  // needing to persist which one was shown last across AttractView's own
+  // mount/unmount cycles. State, not a ref, because it's read during render
+  // (passed to AttractView as a prop) — reading a ref's .current during
+  // render isn't safe (see react-hooks/refs).
+  const [attractEntryCount, setAttractEntryCount] = useState(0);
+
+  // Idle-to-attract timer. Deliberately scoped to view === 'grid' only —
+  // someone mid check-in (splash/visitor form/returning search) must never
+  // get yanked into the ad slideshow. Listens for pointerdown/keydown on the
+  // root container (not window) to reset the countdown on any real
+  // interaction with the grid.
+  useEffect(() => {
+    if (view !== 'grid') return;
+    const container = rootRef.current;
+    if (!container) return;
+
+    function resetIdleTimer() {
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = setTimeout(() => {
+        setAttractEntryCount((n) => n + 1);
+        setView('attract');
+      }, IDLE_MS);
+    }
+
+    resetIdleTimer();
+    container.addEventListener('pointerdown', resetIdleTimer);
+    container.addEventListener('keydown', resetIdleTimer);
+    return () => {
+      if (idleTimerRef.current) clearTimeout(idleTimerRef.current);
+      idleTimerRef.current = null;
+      container.removeEventListener('pointerdown', resetIdleTimer);
+      container.removeEventListener('keydown', resetIdleTimer);
+    };
+  }, [view]);
+
+  // Exiting the attract loop just flips the view back to 'grid' — the
+  // existing grid-entry effect below (view !== 'grid' ? return : fetch...)
+  // already re-fetches the roster whenever `view` transitions to 'grid', so
+  // there's no need to duplicate that fetch here.
+  const exitAttract = useCallback(() => setView('grid'), []);
 
   const [visitorForm, setVisitorForm] = useState<VisitorFormState>(emptyVisitorForm);
   const [visitorError, setVisitorError] = useState<string | null>(null);
@@ -434,27 +589,29 @@ export default function KioskClient() {
   // ---- Render ----
 
   return (
-    <div className="flex min-h-screen flex-1 flex-col bg-neutral-100 dark:bg-neutral-950">
-      <header className="flex items-center justify-between px-4 pt-5 sm:px-8">
-        <div className="flex items-center gap-2.5">
-          <Image
-            src="/bni-logo-transparent.png"
-            alt="BNI"
-            width={160}
-            height={90}
-            priority
-            className="h-8 w-auto sm:h-9"
-          />
-          <span className="text-lg font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
-            Wheeling
-          </span>
-        </div>
-        {roster && (
-          <div className="rounded-full bg-white px-3.5 py-1.5 text-sm font-medium text-neutral-600 shadow-sm dark:bg-neutral-900 dark:text-neutral-300">
-            {formatMeetingDate(roster.meetingDate)}
+    <div ref={rootRef} className="flex min-h-screen flex-1 flex-col bg-neutral-100 dark:bg-neutral-950">
+      {view !== 'attract' && (
+        <header className="flex items-center justify-between px-4 pt-5 sm:px-8">
+          <div className="flex items-center gap-2.5">
+            <Image
+              src="/bni-logo-transparent.png"
+              alt="BNI"
+              width={160}
+              height={90}
+              priority
+              className="h-8 w-auto sm:h-9"
+            />
+            <span className="text-lg font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
+              Wheeling
+            </span>
           </div>
-        )}
-      </header>
+          {roster && (
+            <div className="rounded-full bg-white px-3.5 py-1.5 text-sm font-medium text-neutral-600 shadow-sm dark:bg-neutral-900 dark:text-neutral-300">
+              {formatMeetingDate(roster.meetingDate)}
+            </div>
+          )}
+        </header>
+      )}
 
       {view === 'grid' && (
         <GridView
@@ -469,11 +626,16 @@ export default function KioskClient() {
         />
       )}
 
+      {view === 'attract' && (
+        <AttractView startIndex={attractEntryCount} onExit={exitAttract} />
+      )}
+
       {view === 'splash' && splash && (
         <SplashView
           info={splash}
           undoing={undoing}
           onUndo={() => performUndo(splash.attendanceId)}
+          adSrc={dailyAdSrc}
         />
       )}
 
@@ -540,7 +702,7 @@ function GridView({
   return (
     <main className="flex-1 px-4 pb-12 sm:px-8">
       <div className="mx-auto max-w-5xl">
-        <h1 className="mt-6 text-3xl font-semibold tracking-tight text-neutral-900 sm:text-4xl dark:text-neutral-50">
+        <h1 className="mt-6 font-display text-3xl font-bold tracking-tight text-neutral-900 sm:text-4xl dark:text-neutral-50">
           {roster?.greeting ?? 'Welcome'}
         </h1>
         <p className="mt-1.5 text-neutral-500 dark:text-neutral-400">Tap your name to check in</p>
@@ -626,7 +788,14 @@ function MemberCard({ member, pending, onTap }: { member: Member; pending: boole
 
 // ---- Splash view ----------------------------------------------------------
 
-function SplashView({ info, undoing, onUndo }: { info: SplashInfo; undoing: boolean; onUndo: () => void }) {
+function SplashView({
+  info, undoing, onUndo, adSrc,
+}: {
+  info: SplashInfo;
+  undoing: boolean;
+  onUndo: () => void;
+  adSrc: string;
+}) {
   // React's `autoFocus` prop only triggers an implicit .focus() call for a
   // hardcoded set of host elements (button/input/select/textarea) — it's a
   // no-op on arbitrary elements like h1. So the heading needs a real
@@ -638,29 +807,68 @@ function SplashView({ info, undoing, onUndo }: { info: SplashInfo; undoing: bool
   }, []);
 
   return (
-    <main className="flex flex-1 flex-col items-center justify-center px-6 text-center">
-      <div className="flex h-24 w-24 items-center justify-center rounded-full bg-green-100 dark:bg-green-900/40">
-        <CheckMark className="h-12 w-12 text-green-600 dark:text-green-400" />
+    <main className="relative flex flex-1 flex-col items-center justify-center overflow-hidden px-6 text-center">
+      {/* Day's ad as a full-bleed backdrop, darkened with a scrim underneath
+          so the confirmation text stays legible regardless of the theme or
+          what's in the photo — see dayOfYear()'s comment for the selection
+          logic. This makes the surface ALWAYS effectively dark, which is why
+          every color below is a fixed value rather than a light/dark: pair:
+          Tailwind's dark: variant tracks the OS theme, not "is my local
+          background dark right now," so a normal dark: pairing would render
+          the light-mode (WCAG-failing-on-dark) color whenever the OS theme
+          happens to be light, regardless of this scrim. */}
+      <Image src={adSrc} alt="" fill priority sizes="100vw" className="object-cover" />
+      <div className="absolute inset-0 bg-black/75" />
+
+      {/* Wrapped in one `relative` container rather than adding `relative`
+          to each child: position:absolute content (the image and scrim
+          above) paints above static in-flow content in the same stacking
+          context regardless of DOM order (CSS 2.1 Appendix E) — so without
+          this, the backdrop would cover the confirmation text. */}
+      <div className="relative flex flex-col items-center">
+        <div className="flex h-24 w-24 items-center justify-center rounded-full bg-green-900/40">
+          <CheckMark className="h-12 w-12 text-green-400" />
+        </div>
+        {/* tabIndex + ref-focus: this heading is the whole point of the
+            splash screen, so it (not just the body) gets focus — screen
+            readers on a shared kiosk announce "You're in, {name}"
+            immediately rather than silently landing on <body>. outline-none
+            because this is a programmatic focus-on-mount, not a keyboard tab
+            stop; there's nothing to show a focus ring in response to. */}
+        <h1
+          ref={headingRef}
+          tabIndex={-1}
+          className="mt-6 font-display text-3xl font-bold tracking-tight text-white outline-none sm:text-4xl"
+        >
+          You&apos;re in, {firstNameOf(info.fullName)}
+        </h1>
+        {/* text-neutral-200, not -400/-500 — measured live against the
+            scrim+ad composite to clear 4.5:1 (worst-case white-pixel
+            backdrop still composites to ~rgb(64,64,64), and neutral-400
+            would fall short of 4.5:1 there; -200 clears it with margin). */}
+        <p className="mt-2 text-neutral-200">
+          Checked in at {formatTime(info.checkedInAt)}
+        </p>
+        {/* !text-[#F0595F]: overrides Button's ghost/brand tone, which
+            normally pairs text-[#CF2030] (light) with dark:text-[#F0595F] —
+            here too, that pairing would show the WCAG-failing CF2030
+            whenever the OS theme is light, since dark: doesn't know this
+            particular surface is always dark. Forced to the dark-safe value
+            unconditionally instead; `!` because a same-specificity
+            non-important override isn't reliably ordered ahead of the
+            component's own class in Tailwind's generated stylesheet (see
+            components/ui/button.tsx's docblock). */}
+        <Button
+          variant="ghost"
+          tone="brand"
+          size="touch"
+          onClick={onUndo}
+          disabled={undoing}
+          className="mt-6 !text-[#F0595F]"
+        >
+          Not you? Undo
+        </Button>
       </div>
-      {/* tabIndex + ref-focus: this heading is the whole point of the splash
-          screen, so it (not just the body) gets focus — screen readers on a
-          shared kiosk announce "You're in, {name}" immediately rather than
-          silently landing on <body>. outline-none because this is a
-          programmatic focus-on-mount, not a keyboard tab stop; there's
-          nothing to show a focus ring in response to. */}
-      <h1
-        ref={headingRef}
-        tabIndex={-1}
-        className="mt-6 text-3xl font-semibold tracking-tight text-neutral-900 outline-none sm:text-4xl dark:text-neutral-50"
-      >
-        You&apos;re in, {firstNameOf(info.fullName)}
-      </h1>
-      <p className="mt-2 text-neutral-500 dark:text-neutral-400">
-        Checked in at {formatTime(info.checkedInAt)}
-      </p>
-      <Button variant="ghost" tone="brand" size="touch" onClick={onUndo} disabled={undoing} className="mt-6">
-        Not you? Undo
-      </Button>
     </main>
   );
 }
@@ -699,7 +907,7 @@ function VisitorFormView({
 
         {suggestions && suggestions.length > 0 ? (
           <div className="mt-4">
-            <h1 className="text-2xl font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
+            <h1 className="font-display text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
               Looks like you may have visited before — is this you?
             </h1>
             <div className="mt-6 flex flex-col gap-3">
@@ -737,7 +945,7 @@ function VisitorFormView({
             className="mt-4"
             onSubmit={(e) => { e.preventDefault(); onSubmit(); }}
           >
-            <h1 className="text-2xl font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
+            <h1 className="font-display text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
               Welcome — tell us about you
             </h1>
 
@@ -853,7 +1061,7 @@ function ReturningSearchView({
           ← Back to visitor form
         </button>
 
-        <h1 className="mt-4 text-2xl font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
+        <h1 className="mt-4 font-display text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
           Find your name
         </h1>
 

@@ -412,7 +412,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   return (
     <div className="flex min-h-screen flex-1 flex-col bg-neutral-100 dark:bg-neutral-950 font-sans">
       <header className="flex flex-wrap items-center justify-between gap-2 px-4 pt-5 sm:px-8">
-        <span className="text-lg font-semibold tracking-tight text-neutral-900 dark:text-neutral-50">
+        <span className="font-display text-lg font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
           Wheeling · Admin
         </span>
         <div className="flex items-center gap-3 text-sm text-neutral-500 dark:text-neutral-400">

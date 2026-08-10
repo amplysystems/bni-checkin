@@ -8,8 +8,13 @@
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  /* --font-sans / --font-display are Tailwind theme tokens (defined here,
+     not in app/layout.tsx) so the `font-sans` / `font-display` utilities and
+     this file's own `body` rule below all resolve consistently. The actual
+     font-family values come from next/font's --font-archivo /
+     --font-instrument-sans variables, set on <html> in app/layout.tsx. */
+  --font-sans: var(--font-instrument-sans);
+  --font-display: var(--font-archivo);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -22,5 +27,10 @@
 body {
   background: var(--background);
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  /* Was a hardcoded Arial/Helvetica stack that silently shadowed the loaded
+     webfont for any element without an explicit font-sans class (which was
+     most of the kiosk view). var(--font-sans) now makes Instrument Sans the
+     actual page-wide default; the Arial/Helvetica/sans-serif chain stays as
+     the fallback if the webfont somehow fails to load. */
+  font-family: var(--font-sans), Arial, Helvetica, sans-serif;
 }
