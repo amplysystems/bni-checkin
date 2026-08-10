@@ -26,6 +26,10 @@ type AdminPerson = {
   // (app/api/admin/roster/route.ts's GET), not derived client-side.
   visitCount: number;
   allowExtraVisit: boolean;
+  // Phase 2 Task 7: true when a visitor_thankyou email to this person's
+  // current roster email bounced (email-match heuristic, computed
+  // server-side — see that route's GET for the reasoning).
+  emailBounced: boolean;
 };
 
 type RosterResponse = { people: AdminPerson[] };
@@ -67,6 +71,9 @@ type MeetingsResponse = { meetings: AdminMeeting[] };
 
 type EmailType = 'leadership_report' | 'visitor_thankyou' | 'approval_notice' | 'weekly_export';
 type EmailState = 'draft' | 'awaiting_approval' | 'approved' | 'scheduled' | 'sending' | 'sent' | 'failed';
+// Phase 2 Task 7: null until the first Resend webhook event for this
+// message lands (see db/schema.ts's delivery_status column comment).
+type DeliveryStatus = 'sent' | 'delivered' | 'delayed' | 'bounced' | 'complained' | 'failed';
 
 type EmailMessageRow = {
   id: string;
@@ -81,6 +88,7 @@ type EmailMessageRow = {
   sentAt: string | null;
   error: string | null;
   providerMessageId: string | null;
+  deliveryStatus: DeliveryStatus | null;
   createdAt: string;
 };
 
@@ -1149,7 +1157,22 @@ function RosterRow({
     <tr className={`border-t border-neutral-100 dark:border-neutral-800 ${deactivated ? 'opacity-60' : ''}`}>
       <td className="px-3 py-3 text-sm font-medium text-neutral-900 dark:text-neutral-50">{person.fullName}</td>
       <td className="px-3 py-3 text-sm text-neutral-600 dark:text-neutral-400">{person.industry ?? '—'}</td>
-      <td className="px-3 py-3 text-sm text-neutral-600 dark:text-neutral-400">{person.email ?? '—'}</td>
+      <td className="px-3 py-3 text-sm text-neutral-600 dark:text-neutral-400">
+        {person.email ?? '—'}
+        {person.emailBounced && (
+          // Phase 2 Task 7: this visitor's thank-you email bounced — a
+          // mistyped address is visible here Thursday, not discovered in
+          // month three (spec §7). Email-match heuristic computed
+          // server-side (app/api/admin/roster/route.ts's GET), so it stays
+          // accurate as roster emails change.
+          <span
+            title="A thank-you email to this address bounced"
+            className="ml-2 inline-flex items-center rounded-full bg-red-100 px-2 py-0.5 text-xs font-medium text-red-700 dark:bg-red-900/40 dark:text-red-300"
+          >
+            Email bounced
+          </span>
+        )}
+      </td>
       <td className="px-3 py-3">
         <span className={`inline-flex items-center rounded-full px-2.5 py-1 text-xs font-medium ${meta.className}`}>
           {meta.label}
@@ -1411,6 +1434,40 @@ function EmailStateChip({ message }: { message: EmailMessageRow }) {
   return (
     <span className={`inline-flex flex-none items-center rounded-full px-2.5 py-1 text-xs font-medium ${meta.className}`}>
       {meta.label(message)}
+    </span>
+  );
+}
+
+// Phase 2 Task 7: a second, independent chip reporting what Resend's
+// webhook has told us actually happened to the message AFTER Resend
+// accepted it — "Sent" (the state chip above) only means Resend took the
+// request, not that a mailbox ever received it (spec §7). Kept simple per
+// the plan: the chip's time is the message's own sentAt, not a second query
+// for the matching email_events row's occurredAt — good enough for "did
+// this land," not meant to be a delivery-events timeline.
+const DELIVERY_STATUS_META: Record<DeliveryStatus, { label: string; className: string }> = {
+  sent: { label: 'Sent', className: 'bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300' },
+  delayed: { label: 'Delayed', className: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300' },
+  delivered: {
+    label: 'Delivered',
+    className: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+  },
+  bounced: { label: 'Bounced', className: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' },
+  complained: { label: 'Complained', className: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' },
+  failed: { label: 'Delivery failed', className: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300' },
+};
+
+function DeliveryStatusChip({ message }: { message: EmailMessageRow }) {
+  // A plain 'sent' delivery status is exactly what the state chip already
+  // says ("Sent 5:02 PM") — showing it a second time here would just be
+  // noise, so this chip only earns its place once the webhook has told us
+  // something the state chip doesn't already know.
+  if (!message.deliveryStatus || message.deliveryStatus === 'sent') return null;
+  const meta = DELIVERY_STATUS_META[message.deliveryStatus];
+  const time = message.sentAt ? ` ${formatClockTime(message.sentAt)}` : '';
+  return (
+    <span className={`inline-flex flex-none items-center rounded-full px-2.5 py-1 text-xs font-medium ${meta.className}`}>
+      {meta.label}{time}
     </span>
   );
 }
@@ -1717,6 +1774,7 @@ function EmailRow({
       </div>
       <div className="flex flex-none items-center gap-3">
         <EmailStateChip message={message} />
+        <DeliveryStatusChip message={message} />
         <div className="flex items-center gap-3 text-sm">
           <button
             type="button"

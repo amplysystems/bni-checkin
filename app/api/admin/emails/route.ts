@@ -116,6 +116,12 @@ export async function GET() {
       sentAt: m.sentAt,
       error: m.error,
       providerMessageId: m.providerMessageId,
+      // Task 7: null until the first Resend webhook event for this
+      // message's providerMessageId arrives (see db/schema.ts's column
+      // comment) — the UI only renders a delivery chip when this is
+      // non-null, so "no webhook configured yet" and "sent, webhook just
+      // hasn't landed" both read as "no extra chip," not a false status.
+      deliveryStatus: m.deliveryStatus,
       createdAt: m.createdAt,
     };
   });

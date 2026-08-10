@@ -131,6 +131,21 @@ export const emailMessages = pgTable('email_messages', {
     enum: ['draft', 'awaiting_approval', 'approved', 'scheduled', 'sending', 'sent', 'failed'],
   }).notNull().default('draft'),
   providerMessageId: text('provider_message_id'),
+  // Phase 2 Task 7 (Resend delivery webhooks) additive column — null until
+  // the FIRST webhook event for this message's providerMessageId arrives
+  // (a 'sent' message with no webhook yet, or one sent before the webhook
+  // was configured at all, both read as "unknown," not "sent" — see
+  // app/api/admin/emails/route.ts's GET, which only renders a delivery chip
+  // when this is non-null). Written exclusively by
+  // lib/emails/webhook.ts's forward-only-guarded UPDATE — nothing else in
+  // the engine ever sets it, and even that guarded UPDATE only ever moves
+  // it to a higher-ranked status (see DELIVERY_STATUS_RANK there), never
+  // backward — a duplicated or out-of-order webhook delivery (Resend is
+  // at-least-once and unordered per spec §7) can't regress an already-known
+  // 'delivered' back to 'sent'.
+  deliveryStatus: text('delivery_status', {
+    enum: ['sent', 'delivered', 'delayed', 'bounced', 'complained', 'failed'],
+  }),
   approvedBy: text('approved_by'),
   approvedAt: timestamp('approved_at', { withTimezone: true }),
   // Stamped the instant a row is claimed into 'sending' (both claimAndSend
@@ -150,6 +165,10 @@ export const emailMessages = pgTable('email_messages', {
   check(
     'email_messages_state_check',
     sql`${t.state} IN ('draft', 'awaiting_approval', 'approved', 'scheduled', 'sending', 'sent', 'failed')`,
+  ),
+  check(
+    'email_messages_delivery_status_check',
+    sql`${t.deliveryStatus} IN ('sent', 'delivered', 'delayed', 'bounced', 'complained', 'failed')`,
   ),
 ]);
 

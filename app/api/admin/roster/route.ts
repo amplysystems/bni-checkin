@@ -1,7 +1,7 @@
 import { z } from 'zod';
 import { and, eq, isNull } from 'drizzle-orm';
 import { getDb } from '@/lib/db';
-import { people, memberships, personRoles, attendance } from '@/db/schema';
+import { people, memberships, personRoles, attendance, emailMessages } from '@/db/schema';
 import { requireAdmin } from '@/lib/admin-guard';
 import { changeStatus, ChangeStatusError } from '@/lib/roster';
 import { grantExtraVisit } from '@/lib/checkins';
@@ -38,10 +38,28 @@ export async function GET(req: Request) {
     visitCountByPerson.set(r.personId, (visitCountByPerson.get(r.personId) ?? 0) + 1);
   }
 
+  // Phase 2 Task 7 bounce badge: recipients[0] on a visitor_thankyou row is
+  // the visitor's real address even under SAFE_MODE (see
+  // app/api/admin/emails/route.ts's labelFor — the redirect only happens at
+  // send time, lib/emails/send.ts, never in the stored row), so a bounced
+  // message's recipient email is exactly the heuristic that already maps a
+  // send back to a roster person. This is an email match, not a personId
+  // join — same "email is a hint, not an identity" posture as the rest of
+  // the app (spec §11); a coincidental email collision between an
+  // unrelated person and a bounced visitor is an accepted, vanishingly
+  // unlikely residual, not a correctness bug.
+  const bouncedRows = await db.select({ recipients: emailMessages.recipients })
+    .from(emailMessages)
+    .where(and(eq(emailMessages.type, 'visitor_thankyou'), eq(emailMessages.deliveryStatus, 'bounced')));
+  const bouncedEmails = new Set(
+    bouncedRows.map((r) => r.recipients[0]).filter((e): e is string => Boolean(e)),
+  );
+
   const peopleWithStatus = rows.map((p) => ({
     ...p,
     status: leaderIds.has(p.id) ? 'leadership' : statusByPerson.get(p.id) ?? 'none',
     visitCount: visitCountByPerson.get(p.id) ?? 0,
+    emailBounced: p.email != null && bouncedEmails.has(p.email),
   }));
   return Response.json({ people: peopleWithStatus });
 }

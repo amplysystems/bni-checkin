@@ -1,6 +1,6 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { eq } from 'drizzle-orm';
-import { emailMessages } from '@/db/schema';
+import { emailEvents, emailMessages } from '@/db/schema';
 import { setDb } from '@/lib/db';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seed } from '../scripts/seed';
@@ -50,7 +50,9 @@ describe('lib/emails/export: runWeeklyExport', () => {
 
     const decoded = JSON.parse(Buffer.from(body.attachments[0].content, 'base64').toString('utf-8'));
     expect(decoded).toHaveProperty('generatedAt');
-    for (const table of ['people', 'meetings', 'attendance', 'memberships', 'personRoles', 'emailMessages', 'settings']) {
+    for (const table of [
+      'people', 'meetings', 'attendance', 'memberships', 'personRoles', 'emailMessages', 'emailEvents', 'settings',
+    ]) {
       expect(decoded.tables).toHaveProperty(table);
       expect(Array.isArray(decoded.tables[table])).toBe(true);
     }
@@ -76,6 +78,36 @@ describe('lib/emails/export: runWeeklyExport', () => {
     expect(dumped).toBeTruthy();
     expect(dumped).not.toHaveProperty('bodySnapshot');
     expect(dumped.subject).toBe('x'); // other fields still present
+  });
+
+  it('includes email_events (Task 7) minus payload', async () => {
+    const [message] = await db.insert(emailMessages).values({
+      sendKey: 'export-test:visitor_thankyou', type: 'visitor_thankyou', meetingId: null,
+      recipients: ['visitor@example.com'], subject: 'x', state: 'sent',
+      providerMessageId: 'resend-msg-1', deliveryStatus: 'bounced',
+    }).returning();
+    await db.insert(emailEvents).values({
+      providerEventId: 'evt-export-1',
+      messageId: message.id,
+      eventType: 'email.bounced',
+      occurredAt: SUNDAY,
+      payload: { type: 'email.bounced', data: { email_id: 'resend-msg-1', SENSITIVE_PAYLOAD_MARKER: true } },
+    });
+
+    const fetchMock = mockFetchOk();
+    vi.stubGlobal('fetch', fetchMock);
+    await runWeeklyExport(db, SUNDAY);
+
+    const body = JSON.parse(fetchMock.mock.calls[0][1].body);
+    const decoded = JSON.parse(Buffer.from(body.attachments[0].content, 'base64').toString('utf-8'));
+    expect(decoded.tables.emailEvents).toHaveLength(1);
+    const dumpedEvent = decoded.tables.emailEvents[0];
+    expect(dumpedEvent.providerEventId).toBe('evt-export-1');
+    expect(dumpedEvent.eventType).toBe('email.bounced');
+    expect(dumpedEvent.messageId).toBe(message.id);
+    expect(dumpedEvent).not.toHaveProperty('payload');
+    const rawText = Buffer.from(body.attachments[0].content, 'base64').toString('utf-8');
+    expect(rawText).not.toContain('SENSITIVE_PAYLOAD_MARKER');
   });
 
   it('SAFE_MODE still applies (recipient is already the owner, but the choke point discipline still runs)', async () => {

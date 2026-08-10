@@ -1,0 +1,2 @@
+ALTER TABLE "email_messages" ADD COLUMN "delivery_status" text;--> statement-breakpoint
+ALTER TABLE "email_messages" ADD CONSTRAINT "email_messages_delivery_status_check" CHECK ("email_messages"."delivery_status" IN ('sent', 'delivered', 'delayed', 'bounced', 'complained', 'failed'));

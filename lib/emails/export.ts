@@ -9,18 +9,13 @@
 // CRON_SECRET guard as the email tick.
 //
 // CORRECTION (review): this is NOT "every application table" — it's the
-// seven listed in dumpTables() below (people, meetings, attendance,
-// memberships, personRoles, emailMessages, settings). Explicitly excluded,
-// by name, and why:
+// eight listed in dumpTables() below (people, meetings, attendance,
+// memberships, personRoles, emailMessages, emailEvents, settings).
+// Explicitly excluded, by name, and why:
 //   - rate_limits: ephemeral kiosk rate-limiter state (lib/rate-limit.ts).
 //     Ambient — it self-heals every window rollover and carries no
 //     information worth restoring; including it would just be noise in a
 //     DR-focused export.
-//   - email_events: Resend webhook delivery-status events (spec §7). Not
-//     yet populated by anything — Task 7 builds the webhook handler that
-//     writes to this table. REVISIT once Task 7 lands: delivery history is
-//     genuinely operational data (bounce tracking) and probably belongs in
-//     this export once it exists.
 //   - users / accounts / sessions / verification_tokens: Auth.js identity
 //     and session state. Out of scope for chapter-data DR on two
 //     independent grounds — (1) it's re-derivable (magic-link sign-in
@@ -40,7 +35,12 @@
 // bodySnapshot is deliberately excluded from the email_messages dump: it
 // can be large (the full compiled HTML per message) and isn't needed for
 // the disaster-recovery scenarios in scope (rebuilding roster/attendance/
-// send-state, not replaying old outbound mail content).
+// send-state, not replaying old outbound mail content). Task 7 adds
+// email_events to the dump on the same reasoning, minus its own large
+// field: providerEventId/eventType/occurredAt/messageId are kept (bounce
+// history is genuinely operational data worth restoring), but `payload`
+// (the raw Resend/Svix webhook body) is dropped — same size/relevance
+// tradeoff as bodySnapshot, not a DR requirement.
 //
 // IDEMPOTENCY (review carry-in, closing a spec §8 gap): runWeeklyExport now
 // follows the same "claim BEFORE doing the work" discipline as lib/emails/
@@ -68,7 +68,8 @@
 
 import { eq } from 'drizzle-orm';
 import {
-  attendance, emailMessages, meetings, memberships, people, personRoles, settings as settingsTable,
+  attendance, emailEvents, emailMessages, meetings, memberships, people, personRoles,
+  settings as settingsTable,
 } from '@/db/schema';
 import type { Db } from '@/lib/db';
 import { chicagoDateString } from '@/lib/time';
@@ -78,7 +79,8 @@ import { sendEmailMessage } from './send';
 
 async function dumpTables(db: Db) {
   const [
-    peopleRows, meetingRows, attendanceRows, membershipRows, personRoleRows, emailMessageRows, settingsRows,
+    peopleRows, meetingRows, attendanceRows, membershipRows, personRoleRows,
+    emailMessageRows, emailEventRows, settingsRows,
   ] = await Promise.all([
     db.select().from(people),
     db.select().from(meetings),
@@ -95,6 +97,7 @@ async function dumpTables(db: Db) {
       // bodySnapshot intentionally omitted — see module header.
       state: emailMessages.state,
       providerMessageId: emailMessages.providerMessageId,
+      deliveryStatus: emailMessages.deliveryStatus,
       approvedBy: emailMessages.approvedBy,
       approvedAt: emailMessages.approvedAt,
       sendingAt: emailMessages.sendingAt,
@@ -102,6 +105,14 @@ async function dumpTables(db: Db) {
       error: emailMessages.error,
       createdAt: emailMessages.createdAt,
     }).from(emailMessages),
+    // Task 7: payload intentionally omitted — see module header.
+    db.select({
+      id: emailEvents.id,
+      providerEventId: emailEvents.providerEventId,
+      messageId: emailEvents.messageId,
+      eventType: emailEvents.eventType,
+      occurredAt: emailEvents.occurredAt,
+    }).from(emailEvents),
     db.select().from(settingsTable),
   ]);
 
@@ -112,6 +123,7 @@ async function dumpTables(db: Db) {
     memberships: membershipRows,
     personRoles: personRoleRows,
     emailMessages: emailMessageRows,
+    emailEvents: emailEventRows,
     settings: settingsRows,
   };
 }
