@@ -309,11 +309,15 @@ function RailAmplyFooter() {
 // sidesteps the wrap without a per-item font-size hack — which would
 // itself violate the "no layout jumps" requirement below by changing
 // line-height only on the unlucky ticks where this noun happens to show.
+// Every noun is live-measured to fit the 300px rail's 236px usable width at
+// text-2xl Unbounded 900 without wrapping (widest: "One marketer." = 211px).
+// Long professions ride under their short forms: mortgage broker → lender,
+// business consultant → coach, wealth management → advisor. Don't add a noun
+// without measuring "One {noun}." in the rendered font first.
 const INDUSTRY_NOUNS = [
-  'plumber', 'lawyer', 'realtor', 'marketer', 'banker', 'accountant',
-  'electrician', 'dentist', 'roofer', 'contractor', 'chiropractor',
-  'photographer', 'landscaper', 'mortgage broker', 'advisor',
-  'business coach', 'insurance agent', 'restoration pro',
+  'plumber', 'lawyer', 'realtor', 'marketer', 'banker', 'advisor',
+  'dentist', 'roofer', 'builder', 'painter', 'lender', 'barber',
+  'coach', 'printer',
 ] as const;
 
 // The kiosk-only cycling industry ticker for the rail's bottom, and (at a
