@@ -48,6 +48,7 @@ import {
 import type { Db } from '@/lib/db';
 import { chicagoDateString } from '@/lib/time';
 import { OWNER_EMAIL } from './constants';
+import { weeklyExportSendKey } from './send-keys';
 import { sendEmailMessage } from './send';
 
 async function dumpTables(db: Db) {
@@ -131,15 +132,40 @@ export async function runWeeklyExport(db: Db, now: Date = new Date()): Promise<W
     content: Buffer.from(json, 'utf-8').toString('base64'),
   };
 
+  const subject = exportSubject(dateStr);
+  const html = exportHtml(dateStr, tableCounts);
+
   const result = await sendEmailMessage({
     type: 'weekly_export',
-    sendKey: `weekly-export:${dateStr}`,
+    sendKey: weeklyExportSendKey(dateStr),
     recipients: [OWNER_EMAIL],
-    subject: exportSubject(dateStr),
-    html: exportHtml(dateStr, tableCounts),
+    subject,
+    html,
     text: exportText(dateStr, tableCounts),
     attachments: [attachment],
   }, now);
+
+  // Task 5 carry-in ("latest weekly export linked"): record this send as a
+  // real email_messages row so the admin email center has something to
+  // read. Written AFTER the send succeeds (never a pre-send 'draft' row —
+  // this type never enters lib/emails/engine.ts's state machine at all),
+  // and only after dumpTables() already ran above, so this week's own row
+  // is never included in the JSON attachment it's documenting.
+  // onConflictDoNothing on the per-day send_key: a duplicated cron trigger
+  // still sends twice (an accepted pre-existing gap — see this module's
+  // header), but only ever leaves one row behind for the day, so "latest
+  // export" reads never see a spurious duplicate.
+  await db.insert(emailMessages).values({
+    sendKey: weeklyExportSendKey(dateStr),
+    type: 'weekly_export',
+    meetingId: null,
+    recipients: [OWNER_EMAIL],
+    subject,
+    bodySnapshot: html,
+    state: 'sent',
+    sentAt: now,
+    providerMessageId: result.providerMessageId,
+  }).onConflictDoNothing({ target: emailMessages.sendKey });
 
   return { tableCounts, providerMessageId: result.providerMessageId };
 }

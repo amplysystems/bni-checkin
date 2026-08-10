@@ -44,13 +44,21 @@ const SETTINGS_DEFAULTS: SettingsRow = {
 
 // Falls back to schema defaults if the singleton row hasn't been seeded
 // yet — keeps the engine usable (e.g. in a bare test DB) without forcing
-// every caller to seed settings first.
-async function getSettings(db: Db): Promise<SettingsRow> {
+// every caller to seed settings first. Exported so Task 5's admin routes
+// (app/api/admin/emails, app/api/admin/settings) read the exact same
+// fallback the engine itself relies on, rather than re-declaring it.
+export async function getSettings(db: Db): Promise<SettingsRow> {
   const [row] = await db.select().from(settingsTable).where(eq(settingsTable.id, 1));
   return row ?? SETTINGS_DEFAULTS;
 }
 
-function scheduledTimeFor(message: EmailMessage, meetingDateStr: string, settingsRow: SettingsRow): Date {
+// Exported so app/api/admin/emails' GET can show a 'scheduled' row's actual
+// send time (spec: state chips read "Scheduled 5:30 PM", not just
+// "Scheduled") without re-deriving this per-type time lookup itself. Only
+// meaningful for leadership_report/visitor_thankyou — the two types that
+// ever pass through 'scheduled' at all (approval_notice and weekly_export
+// never do, see their own module headers).
+export function scheduledTimeFor(message: EmailMessage, meetingDateStr: string, settingsRow: SettingsRow): Date {
   const hhmm = message.type === 'leadership_report' ? settingsRow.reportSendTime : settingsRow.thankyouSendTime;
   return chicagoTimeToUtc(meetingDateStr, hhmm);
 }

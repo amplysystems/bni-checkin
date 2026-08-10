@@ -1,0 +1,2 @@
+ALTER TABLE "email_messages" DROP CONSTRAINT "email_messages_type_check";--> statement-breakpoint
+ALTER TABLE "email_messages" ADD CONSTRAINT "email_messages_type_check" CHECK ("email_messages"."type" IN ('leadership_report', 'visitor_thankyou', 'approval_notice', 'weekly_export'));

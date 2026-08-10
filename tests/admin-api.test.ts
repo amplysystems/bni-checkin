@@ -15,6 +15,8 @@ import { GET as attGET, POST as attPOST } from '@/app/api/admin/attendance/route
 import { GET as rosterGET, POST as rosterPOST } from '@/app/api/admin/roster/route';
 import { GET as meetingsGET } from '@/app/api/admin/meetings/route';
 import { POST as rateLimitsPOST } from '@/app/api/admin/rate-limits/route';
+import { GET as emailsGET, POST as emailsPOST } from '@/app/api/admin/emails/route';
+import { GET as settingsGET, POST as settingsPOST } from '@/app/api/admin/settings/route';
 
 const mockAuth = vi.mocked(auth);
 
@@ -57,6 +59,10 @@ describe('admin API', () => {
     expect((await rosterGET(new Request('http://admin.test/api/admin/roster'))).status).toBe(401);
     expect((await attPOST(post('/api/admin/attendance', {}))).status).toBe(401);
     expect((await rosterPOST(post('/api/admin/roster', {}))).status).toBe(401);
+    expect((await emailsGET()).status).toBe(401);
+    expect((await emailsPOST(post('/api/admin/emails', {}))).status).toBe(401);
+    expect((await settingsGET()).status).toBe(401);
+    expect((await settingsPOST(post('/api/admin/settings', {}))).status).toBe(401);
   });
 
   it('admin can add and void attendance, and the audit trail records who', async () => {

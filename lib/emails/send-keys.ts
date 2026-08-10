@@ -30,3 +30,14 @@ export function visitorThankyouSendKey(meetingId: string, personId: string): str
 export function approvalNoticeSendKey(meetingId: string): string {
   return `${meetingId}:approval_notice`;
 }
+
+// One per calendar day (Task 5 carry-in) — lib/emails/export.ts's
+// runWeeklyExport uses this as the ON CONFLICT target when it records its
+// own send as an email_messages row, so a duplicated weekly-export cron
+// trigger on the same Chicago date can't leave two rows behind (it CAN
+// still send the email twice — see that module's header for why this task
+// deliberately doesn't change that pre-existing behavior — but the admin
+// email center's "latest export" read never double-counts either way).
+export function weeklyExportSendKey(dateStr: string): string {
+  return `weekly-export:${dateStr}`;
+}

@@ -88,7 +88,15 @@ export const emailMessages = pgTable('email_messages', {
   // lib/emails/engine.ts's ensureApprovalNotice — a real email_messages row
   // (not a side-channel notification) so its send_key gives it the exact
   // same double-send-is-impossible guarantee as everything else.
-  type: text('type', { enum: ['leadership_report', 'visitor_thankyou', 'approval_notice'] }).notNull(),
+  //
+  // 'weekly_export' (Task 5 carry-in "latest weekly export linked"):
+  // lib/emails/export.ts's runWeeklyExport records itself as a row here,
+  // AFTER a successful send, purely so the admin email center (Task 5) has
+  // something to read "when did the last export go out" from — this type
+  // never flows through lib/emails/engine.ts's state machine (it's written
+  // directly in state 'sent', never draft/awaiting_approval/scheduled) and
+  // has no meetingId.
+  type: text('type', { enum: ['leadership_report', 'visitor_thankyou', 'approval_notice', 'weekly_export'] }).notNull(),
   meetingId: uuid('meeting_id').references(() => meetings.id),
   recipients: jsonb('recipients').$type<string[]>().notNull(),
   subject: text('subject').notNull(),
@@ -109,7 +117,10 @@ export const emailMessages = pgTable('email_messages', {
   error: text('error'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
-  check('email_messages_type_check', sql`${t.type} IN ('leadership_report', 'visitor_thankyou', 'approval_notice')`),
+  check(
+    'email_messages_type_check',
+    sql`${t.type} IN ('leadership_report', 'visitor_thankyou', 'approval_notice', 'weekly_export')`,
+  ),
   check(
     'email_messages_state_check',
     sql`${t.state} IN ('draft', 'awaiting_approval', 'approved', 'scheduled', 'sending', 'sent', 'failed')`,

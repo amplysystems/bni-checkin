@@ -56,6 +56,39 @@ type AdminMeeting = {
 
 type MeetingsResponse = { meetings: AdminMeeting[] };
 
+// ---- Emails (Phase 2 Task 5) types (mirrored from app/api/admin/emails and
+// app/api/admin/settings' contracts) --------------------------------------
+
+type EmailType = 'leadership_report' | 'visitor_thankyou' | 'approval_notice' | 'weekly_export';
+type EmailState = 'draft' | 'awaiting_approval' | 'approved' | 'scheduled' | 'sending' | 'sent' | 'failed';
+
+type EmailMessageRow = {
+  id: string;
+  type: EmailType;
+  label: string;
+  state: EmailState;
+  meetingId: string | null;
+  meetingDate: string | null;
+  recipientsCount: number;
+  subject: string;
+  scheduledFor: string | null;
+  sentAt: string | null;
+  error: string | null;
+  providerMessageId: string | null;
+  createdAt: string;
+};
+
+type EmailsResponse = { messages: EmailMessageRow[] };
+
+type EmailSettings = {
+  approveMode: boolean;
+  reportSendTime: string;
+  thankyouSendTime: string;
+  reportRecipients: string[];
+};
+
+type SettingsResponse = { settings: EmailSettings };
+
 type CreateStatus = 'member' | 'leadership' | 'visitor';
 
 type PersonFormState = {
@@ -74,7 +107,10 @@ const emptyForm: PersonFormState = {
 type DialogState = { mode: 'create' } | { mode: 'edit'; person: AdminPerson } | null;
 
 type LoadResult =
-  | { ok: true; people: AdminPerson[]; attendance: AttendanceRow[]; meetingDate: string; meetings: AdminMeeting[] }
+  | {
+      ok: true; people: AdminPerson[]; attendance: AttendanceRow[]; meetingDate: string; meetings: AdminMeeting[];
+      emailMessages: EmailMessageRow[]; emailSettings: EmailSettings;
+    }
   | { ok: false };
 
 const GENERIC_ERROR = 'Something went wrong — try again.';
@@ -228,6 +264,8 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [attendance, setAttendance] = useState<AttendanceRow[] | null>(null);
   const [meetingDate, setMeetingDate] = useState<string | null>(null);
   const [meetings, setMeetings] = useState<AdminMeeting[] | null>(null);
+  const [emailMessages, setEmailMessages] = useState<EmailMessageRow[] | null>(null);
+  const [emailSettings, setEmailSettings] = useState<EmailSettings | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [showDeactivated, setShowDeactivated] = useState(false);
 
@@ -236,6 +274,33 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [reactivatingId, setReactivatingId] = useState<string | null>(null);
   const [makingMemberId, setMakingMemberId] = useState<string | null>(null);
   const [resettingRateLimits, setResettingRateLimits] = useState(false);
+
+  // ---- Emails section state (Phase 2 Task 5) ----
+  const [previewMessage, setPreviewMessage] = useState<{ id: string; subject: string; html: string } | null>(null);
+  const [previewLoadingId, setPreviewLoadingId] = useState<string | null>(null);
+  const previewPreviousFocusRef = useRef<HTMLElement | null>(null);
+  const [approvingId, setApprovingId] = useState<string | null>(null);
+  const [sendingId, setSendingId] = useState<string | null>(null);
+  const [compileDate, setCompileDate] = useState('');
+  const [compiling, setCompiling] = useState(false);
+  // `settingsOverride` starts null and is written only once the admin
+  // actually edits something; `settingsForm` (derived below, not its own
+  // piece of state) falls back to the freshly-fetched emailSettings until
+  // then. That derivation — rather than an effect that copies emailSettings
+  // into local state on first load — avoids a setState-during-effect
+  // cascade while still giving the form its own "life" once touched, same
+  // idea as PersonDialog's `form` state just without a dialog wrapper.
+  const [settingsOverride, setSettingsOverride] = useState<EmailSettings | null>(null);
+  const settingsForm = settingsOverride ?? emailSettings;
+  const updateSettingsForm = useCallback(
+    (updater: (f: EmailSettings | null) => EmailSettings | null) => {
+      setSettingsOverride((prev) => updater(prev ?? emailSettings));
+    },
+    [emailSettings],
+  );
+  const [savingSettings, setSavingSettings] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
+  const [recipientInput, setRecipientInput] = useState('');
 
   const [dialog, setDialog] = useState<DialogState>(null);
   const [form, setForm] = useState<PersonFormState>(emptyForm);
@@ -281,21 +346,27 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const fetchAdminData = useCallback(async (includeDeactivated: boolean): Promise<LoadResult> => {
     try {
       const rosterUrl = includeDeactivated ? '/api/admin/roster?includeDeactivated=1' : '/api/admin/roster';
-      const [rosterRes, attRes, meetingsRes] = await Promise.all([
+      const [rosterRes, attRes, meetingsRes, emailsRes, settingsRes] = await Promise.all([
         fetch(rosterUrl),
         fetch('/api/admin/attendance'),
         fetch('/api/admin/meetings'),
+        fetch('/api/admin/emails'),
+        fetch('/api/admin/settings'),
       ]);
-      if (!rosterRes.ok || !attRes.ok || !meetingsRes.ok) return { ok: false };
+      if (!rosterRes.ok || !attRes.ok || !meetingsRes.ok || !emailsRes.ok || !settingsRes.ok) return { ok: false };
       const rosterData = (await rosterRes.json()) as RosterResponse;
       const attData = (await attRes.json()) as AttendanceResponse;
       const meetingsData = (await meetingsRes.json()) as MeetingsResponse;
+      const emailsData = (await emailsRes.json()) as EmailsResponse;
+      const settingsData = (await settingsRes.json()) as SettingsResponse;
       return {
         ok: true,
         people: rosterData.people,
         attendance: attData.attendance,
         meetingDate: attData.meetingDate,
         meetings: meetingsData.meetings,
+        emailMessages: emailsData.messages,
+        emailSettings: settingsData.settings,
       };
     } catch {
       return { ok: false };
@@ -309,6 +380,8 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
       setAttendance(result.attendance);
       setMeetingDate(result.meetingDate);
       setMeetings(result.meetings);
+      setEmailMessages(result.emailMessages);
+      setEmailSettings(result.emailSettings);
       setLoadError(false);
     } else {
       setLoadError(true);
@@ -566,6 +639,152 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     loadAll();
   }, [makingMemberId, showToast, loadAll]);
 
+  // ---- Emails panel: preview / approve / send now / retry / compile ----
+
+  const handlePreview = useCallback(async (message: EmailMessageRow) => {
+    if (previewLoadingId) return;
+    previewPreviousFocusRef.current = document.activeElement as HTMLElement | null;
+    setPreviewLoadingId(message.id);
+    const result = await postJson<{ subject: string; html: string }>('/api/admin/emails', {
+      action: 'preview', id: message.id,
+    });
+    setPreviewLoadingId(null);
+    if (!result.ok) {
+      showToast(GENERIC_ERROR);
+      return;
+    }
+    setPreviewMessage({ id: message.id, subject: result.data.subject, html: result.data.html });
+  }, [previewLoadingId, showToast]);
+
+  const closePreview = useCallback(() => {
+    setPreviewMessage(null);
+    previewPreviousFocusRef.current?.focus();
+    previewPreviousFocusRef.current = null;
+  }, []);
+
+  useEffect(() => {
+    if (!previewMessage) return;
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') closePreview();
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [previewMessage, closePreview]);
+
+  const handleApprove = useCallback(async (message: EmailMessageRow) => {
+    if (approvingId) return;
+    const confirmed = window.confirm(
+      `Approve "${message.label}"? It'll go out on its own once its time comes — you're just clearing it to send.`,
+    );
+    if (!confirmed) return;
+    setApprovingId(message.id);
+    const result = await postJson('/api/admin/emails', { action: 'approve', id: message.id });
+    setApprovingId(null);
+    if (!result.ok) {
+      showToast(GENERIC_ERROR);
+      return;
+    }
+    showToast('Approved');
+    loadAll();
+  }, [approvingId, showToast, loadAll]);
+
+  const handleSendNow = useCallback(async (message: EmailMessageRow) => {
+    if (sendingId) return;
+    const isRetry = message.state === 'failed';
+    const confirmed = window.confirm(
+      isRetry
+        ? `Try sending "${message.label}" again right now?`
+        : `Send "${message.label}" right now, instead of waiting for its scheduled time?`,
+    );
+    if (!confirmed) return;
+    setSendingId(message.id);
+    const result = await postJson('/api/admin/emails', { action: 'sendNow', id: message.id });
+    setSendingId(null);
+    if (!result.ok) {
+      showToast(GENERIC_ERROR);
+      return;
+    }
+    showToast(isRetry ? 'Retried' : 'Sent');
+    loadAll();
+  }, [sendingId, showToast, loadAll]);
+
+  const handleCompile = useCallback(async () => {
+    if (compiling || !compileDate) return;
+    setCompiling(true);
+    const result = await postJson<{ meetingId: string; created: number; skipped: number }>('/api/admin/emails', {
+      action: 'compile', meetingDate: compileDate,
+    });
+    setCompiling(false);
+    if (!result.ok) {
+      showToast(result.status === 404 ? "No meeting on that date — check the date and try again." : GENERIC_ERROR);
+      return;
+    }
+    showToast(
+      result.data.created > 0
+        ? `Ready — ${result.data.created} email${result.data.created === 1 ? '' : 's'} compiled`
+        : 'Already compiled — nothing new to do',
+    );
+    setCompileDate('');
+    loadAll();
+  }, [compiling, compileDate, showToast, loadAll]);
+
+  // ---- Emails panel: settings (approve-mode, send times, recipients) ----
+
+  const handleToggleApproveMode = useCallback(async (next: boolean) => {
+    updateSettingsForm((f) => (f ? { ...f, approveMode: next } : f));
+    const result = await postJson<{ settings: EmailSettings }>('/api/admin/settings', { approveMode: next });
+    if (!result.ok) {
+      showToast(GENERIC_ERROR);
+      updateSettingsForm((f) => (f ? { ...f, approveMode: !next } : f)); // revert the optimistic flip
+      return;
+    }
+    showToast(next ? 'Approval required before sending' : 'Emails will send by themselves now');
+    loadAll();
+  }, [updateSettingsForm, showToast, loadAll]);
+
+  const handleSaveEmailSettings = useCallback(async () => {
+    if (!settingsForm || savingSettings) return;
+    setSettingsError(null);
+    setSavingSettings(true);
+    const result = await postJson<{ settings: EmailSettings }>('/api/admin/settings', {
+      reportSendTime: settingsForm.reportSendTime,
+      thankyouSendTime: settingsForm.thankyouSendTime,
+      reportRecipients: settingsForm.reportRecipients,
+    });
+    setSavingSettings(false);
+    if (!result.ok) {
+      setSettingsError(result.error ?? SAVE_CONNECTION_ERROR);
+      return;
+    }
+    showToast('Email settings saved');
+    loadAll();
+  }, [settingsForm, savingSettings, showToast, loadAll]);
+
+  const addRecipient = useCallback(() => {
+    const email = recipientInput.trim();
+    if (!email) return;
+    updateSettingsForm((f) => {
+      if (!f) return f;
+      if (f.reportRecipients.includes(email)) return f;
+      return { ...f, reportRecipients: [...f.reportRecipients, email] };
+    });
+    setRecipientInput('');
+  }, [recipientInput, updateSettingsForm]);
+
+  const removeRecipient = useCallback((email: string) => {
+    updateSettingsForm((f) => (f ? { ...f, reportRecipients: f.reportRecipients.filter((e) => e !== email) } : f));
+  }, [updateSettingsForm]);
+
+  const toggleRosterRecipient = useCallback((email: string, checked: boolean) => {
+    updateSettingsForm((f) => {
+      if (!f) return f;
+      if (checked) {
+        return f.reportRecipients.includes(email) ? f : { ...f, reportRecipients: [...f.reportRecipients, email] };
+      }
+      return { ...f, reportRecipients: f.reportRecipients.filter((e) => e !== email) };
+    });
+  }, [updateSettingsForm]);
+
   // ---- Render ----
 
   return (
@@ -601,13 +820,17 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
             </div>
           )}
 
-          {!loadError && (people === null || attendance === null || meetings === null) && (
+          {!loadError && (
+            people === null || attendance === null || meetings === null
+            || emailMessages === null || settingsForm === null
+          ) && (
             <div className="mt-8 rounded-2xl bg-white p-8 text-center text-neutral-500 shadow-sm dark:bg-neutral-900 dark:text-neutral-400">
               Loading…
             </div>
           )}
 
-          {!loadError && people !== null && attendance !== null && meetings !== null && (
+          {!loadError && people !== null && attendance !== null && meetings !== null
+            && emailMessages !== null && settingsForm !== null && (
             <>
               <TodayPanel
                 people={activePeople}
@@ -631,6 +854,31 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
                 onMakeMember={handleMakeMember}
               />
               <MeetingsPanel meetings={meetings} todayDate={meetingDate} />
+              <EmailsSection
+                messages={emailMessages}
+                previewLoadingId={previewLoadingId}
+                approvingId={approvingId}
+                sendingId={sendingId}
+                onPreview={handlePreview}
+                onApprove={handleApprove}
+                onSendNow={handleSendNow}
+                compileDate={compileDate}
+                onCompileDateChange={setCompileDate}
+                compiling={compiling}
+                onCompile={handleCompile}
+                settingsForm={settingsForm}
+                onToggleApproveMode={handleToggleApproveMode}
+                onSettingsFormChange={updateSettingsForm}
+                recipientInput={recipientInput}
+                onRecipientInputChange={setRecipientInput}
+                onAddRecipient={addRecipient}
+                onRemoveRecipient={removeRecipient}
+                onToggleRosterRecipient={toggleRosterRecipient}
+                rosterWithEmail={people.filter((p) => p.email !== null && p.deactivatedAt === null)}
+                savingSettings={savingSettings}
+                settingsError={settingsError}
+                onSaveSettings={handleSaveEmailSettings}
+              />
             </>
           )}
         </div>
@@ -646,6 +894,14 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
           saveDisabled={saveDisabled}
           onSave={handleSave}
           onClose={closeDialog}
+        />
+      )}
+
+      {previewMessage && (
+        <EmailPreviewDialog
+          subject={previewMessage.subject}
+          html={previewMessage.html}
+          onClose={closePreview}
         />
       )}
 
@@ -1026,6 +1282,455 @@ function MeetingRow({
           )}
         </div>
       )}
+    </div>
+  );
+}
+
+// ---- Emails section (Phase 2 Task 5) ---------------------------------------
+
+// Chicago clock time regardless of the admin's own device timezone — same
+// reasoning as formatMeetingDate's fixed 'UTC' trick above, just for a
+// time-of-day instead of a calendar date: the settings' send times are
+// always Chicago-local, and a chip reading "Scheduled 5:30 PM" needs to mean
+// 5:30 PM Chicago time no matter where the admin happens to be sitting.
+function formatClockTime(iso: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', hour: 'numeric', minute: '2-digit',
+  }).format(new Date(iso));
+}
+
+function formatExportTimestamp(iso: string): string {
+  return new Intl.DateTimeFormat('en-US', {
+    timeZone: 'America/Chicago', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit',
+  }).format(new Date(iso));
+}
+
+const EMAIL_STATE_META: Record<EmailState, { label: (m: EmailMessageRow) => string; className: string }> = {
+  draft: {
+    label: () => 'Draft',
+    className: 'bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300',
+  },
+  awaiting_approval: {
+    label: () => 'Waiting for approval',
+    className: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-300',
+  },
+  approved: {
+    label: () => 'Approved',
+    className: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+  },
+  scheduled: {
+    label: (m) => (m.scheduledFor ? `Scheduled ${formatClockTime(m.scheduledFor)}` : 'Scheduled'),
+    className: 'bg-blue-100 text-blue-700 dark:bg-blue-900/40 dark:text-blue-300',
+  },
+  sending: {
+    label: () => 'Sending…',
+    className: 'bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300',
+  },
+  sent: {
+    label: (m) => (m.sentAt ? `Sent ${formatClockTime(m.sentAt)}` : 'Sent'),
+    className: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-300',
+  },
+  failed: {
+    label: () => 'Failed',
+    className: 'bg-red-100 text-red-700 dark:bg-red-900/40 dark:text-red-300',
+  },
+};
+
+function EmailStateChip({ message }: { message: EmailMessageRow }) {
+  const meta = EMAIL_STATE_META[message.state];
+  return (
+    <span className={`inline-flex flex-none items-center rounded-full px-2.5 py-1 text-xs font-medium ${meta.className}`}>
+      {meta.label(message)}
+    </span>
+  );
+}
+
+// The type ordering rows appear in within a meeting group — report first
+// (the "big picture" email), then thank-yous, then the internal
+// approval-notice housekeeping message last.
+const TYPE_ORDER: Record<EmailType, number> = {
+  leadership_report: 0, visitor_thankyou: 1, approval_notice: 2, weekly_export: 3,
+};
+
+type MeetingEmailGroup = { meetingId: string | null; meetingDate: string | null; messages: EmailMessageRow[] };
+
+function groupEmailMessages(messages: EmailMessageRow[]): MeetingEmailGroup[] {
+  const byKey = new Map<string, MeetingEmailGroup>();
+  for (const m of messages) {
+    const key = m.meetingId ?? 'none';
+    let group = byKey.get(key);
+    if (!group) {
+      group = { meetingId: m.meetingId, meetingDate: m.meetingDate, messages: [] };
+      byKey.set(key, group);
+    }
+    group.messages.push(m);
+  }
+  for (const group of byKey.values()) {
+    group.messages.sort((a, b) => TYPE_ORDER[a.type] - TYPE_ORDER[b.type] || a.label.localeCompare(b.label));
+  }
+  // Real meetings sort most-recent-first; the non-meeting (weekly export)
+  // group always sorts last — it isn't a week, it doesn't compete with them.
+  return Array.from(byKey.values()).sort((a, b) => {
+    if (a.meetingId === null) return 1;
+    if (b.meetingId === null) return -1;
+    return (b.meetingDate ?? '').localeCompare(a.meetingDate ?? '');
+  });
+}
+
+const SEND_NOW_STATES: EmailState[] = ['draft', 'awaiting_approval', 'scheduled', 'failed'];
+
+function EmailsSection({
+  messages, previewLoadingId, approvingId, sendingId, onPreview, onApprove, onSendNow,
+  compileDate, onCompileDateChange, compiling, onCompile,
+  settingsForm, onToggleApproveMode, onSettingsFormChange,
+  recipientInput, onRecipientInputChange, onAddRecipient, onRemoveRecipient, onToggleRosterRecipient,
+  rosterWithEmail, savingSettings, settingsError, onSaveSettings,
+}: {
+  messages: EmailMessageRow[];
+  previewLoadingId: string | null;
+  approvingId: string | null;
+  sendingId: string | null;
+  onPreview: (m: EmailMessageRow) => void;
+  onApprove: (m: EmailMessageRow) => void;
+  onSendNow: (m: EmailMessageRow) => void;
+  compileDate: string;
+  onCompileDateChange: (v: string) => void;
+  compiling: boolean;
+  onCompile: () => void;
+  settingsForm: EmailSettings;
+  onToggleApproveMode: (next: boolean) => void;
+  onSettingsFormChange: (updater: (f: EmailSettings | null) => EmailSettings | null) => void;
+  recipientInput: string;
+  onRecipientInputChange: (v: string) => void;
+  onAddRecipient: () => void;
+  onRemoveRecipient: (email: string) => void;
+  onToggleRosterRecipient: (email: string, checked: boolean) => void;
+  rosterWithEmail: AdminPerson[];
+  savingSettings: boolean;
+  settingsError: string | null;
+  onSaveSettings: () => void;
+}) {
+  const groups = useMemo(() => groupEmailMessages(messages), [messages]);
+  const failedCount = useMemo(() => messages.filter((m) => m.state === 'failed').length, [messages]);
+  const latestWeeklyExport = useMemo(
+    () => messages
+      .filter((m) => m.type === 'weekly_export' && m.sentAt)
+      .sort((a, b) => (b.sentAt ?? '').localeCompare(a.sentAt ?? ''))[0] ?? null,
+    [messages],
+  );
+
+  return (
+    <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm dark:bg-neutral-900">
+      <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">Emails</h2>
+      <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+        Visitor thank-yous and the weekly leadership report &mdash; preview them, approve them, or send them yourself.
+      </p>
+
+      {failedCount > 0 && (
+        <div className={`mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm font-medium dark:bg-red-950/40 ${RED_TEXT_CLASS}`}>
+          {failedCount === 1 ? '1 email failed to send — see below.' : `${failedCount} emails failed to send — see below.`}
+        </div>
+      )}
+
+      {groups.length === 0 ? (
+        <p className="mt-4 text-sm text-neutral-400 dark:text-neutral-500">No emails yet.</p>
+      ) : (
+        <div className="mt-4 flex flex-col gap-4">
+          {groups.map((group) => (
+            <div key={group.meetingId ?? 'none'}>
+              <p className="mb-1.5 text-xs font-medium uppercase tracking-wide text-neutral-400 dark:text-neutral-500">
+                {group.meetingDate ? formatMeetingDate(group.meetingDate) : 'Weekly exports'}
+              </p>
+              <div className="flex flex-col gap-2">
+                {group.messages.map((m) => (
+                  <EmailRow
+                    key={m.id}
+                    message={m}
+                    previewLoading={previewLoadingId === m.id}
+                    approving={approvingId === m.id}
+                    sending={sendingId === m.id}
+                    onPreview={() => onPreview(m)}
+                    onApprove={() => onApprove(m)}
+                    onSendNow={() => onSendNow(m)}
+                  />
+                ))}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      <div className="mt-4 flex flex-wrap items-center gap-3 rounded-xl border border-dashed border-neutral-200 px-4 py-3 text-sm dark:border-neutral-700">
+        <span className="text-neutral-500 dark:text-neutral-400">
+          Special meeting on a different day? Get its emails ready:
+        </span>
+        <input
+          type="date"
+          value={compileDate}
+          onChange={(e) => onCompileDateChange(e.target.value)}
+          className={`${ADMIN_INPUT_CLASS} w-auto`}
+        />
+        <Button variant="ghost" tone="neutral" size="md" onClick={onCompile} disabled={compiling || !compileDate}>
+          {compiling ? 'Getting them ready…' : 'Get emails ready'}
+        </Button>
+      </div>
+
+      {/* ---- Email settings card ---- */}
+      <div className="mt-6 border-t border-neutral-100 pt-6 dark:border-neutral-800">
+        <h3 className="text-base font-semibold text-neutral-900 dark:text-neutral-50">Email settings</h3>
+        <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+          Controls when the Wednesday emails go out, and who sees the leadership report.
+        </p>
+
+        <label className="mt-4 flex cursor-pointer items-start gap-3 rounded-xl bg-neutral-50 p-4 dark:bg-neutral-800/50">
+          <input
+            type="checkbox"
+            checked={settingsForm.approveMode}
+            onChange={(e) => onToggleApproveMode(e.target.checked)}
+            className="mt-0.5 h-5 w-5 flex-none rounded border-neutral-300 dark:border-neutral-600"
+          />
+          <span>
+            <span className="block text-sm font-medium text-neutral-900 dark:text-neutral-50">
+              Approve before sending
+            </span>
+            <span className="mt-0.5 block text-xs text-neutral-500 dark:text-neutral-400">
+              These send by themselves on Wednesdays. You approve them first while this switch is on.
+            </span>
+          </span>
+        </label>
+
+        <div className="mt-4 grid gap-4 sm:grid-cols-2">
+          <DialogField label="Visitor thank-you time">
+            <input
+              type="time"
+              min="16:45"
+              max="19:45"
+              value={settingsForm.thankyouSendTime}
+              onChange={(e) => onSettingsFormChange((f) => (f ? { ...f, thankyouSendTime: e.target.value } : f))}
+              className={ADMIN_INPUT_CLASS}
+            />
+            <span className="mt-1 block text-xs text-neutral-400 dark:text-neutral-500">
+              Between 4:45 and 7:45 PM — emails go out at the next quarter-hour.
+            </span>
+          </DialogField>
+          <DialogField label="Leadership report time">
+            <input
+              type="time"
+              min="16:45"
+              max="19:45"
+              value={settingsForm.reportSendTime}
+              onChange={(e) => onSettingsFormChange((f) => (f ? { ...f, reportSendTime: e.target.value } : f))}
+              className={ADMIN_INPUT_CLASS}
+            />
+            <span className="mt-1 block text-xs text-neutral-400 dark:text-neutral-500">
+              Between 4:45 and 7:45 PM — emails go out at the next quarter-hour.
+            </span>
+          </DialogField>
+        </div>
+
+        <div className="mt-4">
+          <p className="text-xs font-medium text-neutral-500 dark:text-neutral-400">Who gets the weekly report</p>
+          <p className="mt-0.5 text-xs text-neutral-400 dark:text-neutral-500">
+            Jason always gets a copy too, even if this list is empty.
+          </p>
+
+          {settingsForm.reportRecipients.length > 0 && (
+            <div className="mt-2 flex flex-wrap gap-2">
+              {settingsForm.reportRecipients.map((email) => (
+                <span
+                  key={email}
+                  className="inline-flex items-center gap-1.5 rounded-full bg-neutral-100 py-1 pl-3 pr-1.5 text-xs font-medium text-neutral-700 dark:bg-neutral-800 dark:text-neutral-300"
+                >
+                  {email}
+                  <button
+                    type="button"
+                    onClick={() => onRemoveRecipient(email)}
+                    aria-label={`Remove ${email}`}
+                    className="flex h-4 w-4 items-center justify-center rounded-full text-neutral-400 hover:bg-neutral-200 hover:text-neutral-700 dark:hover:bg-neutral-700 dark:hover:text-neutral-100"
+                  >
+                    ×
+                  </button>
+                </span>
+              ))}
+            </div>
+          )}
+
+          <div className="mt-2 flex gap-2">
+            <input
+              type="email"
+              value={recipientInput}
+              onChange={(e) => onRecipientInputChange(e.target.value)}
+              onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); onAddRecipient(); } }}
+              placeholder="name@example.com"
+              className={ADMIN_INPUT_CLASS}
+            />
+            <Button type="button" variant="secondary" onClick={onAddRecipient}>Add</Button>
+          </div>
+
+          {rosterWithEmail.length > 0 && (
+            <div className="mt-3">
+              <p className="text-xs text-neutral-400 dark:text-neutral-500">Or pick from the roster:</p>
+              <div className="mt-1.5 flex flex-col gap-1.5">
+                {rosterWithEmail.map((p) => (
+                  <label key={p.id} className="flex items-center gap-2 text-sm text-neutral-700 dark:text-neutral-300">
+                    <input
+                      type="checkbox"
+                      checked={settingsForm.reportRecipients.includes(p.email!)}
+                      onChange={(e) => onToggleRosterRecipient(p.email!, e.target.checked)}
+                      className="h-4 w-4 rounded border-neutral-300 dark:border-neutral-600"
+                    />
+                    {p.fullName} <span className="text-neutral-400 dark:text-neutral-500">({p.email})</span>
+                  </label>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        {settingsError && (
+          <div className={`mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm dark:bg-red-950/40 ${RED_TEXT_CLASS}`}>
+            {settingsError}
+          </div>
+        )}
+
+        <div className="mt-4 flex justify-end">
+          <Button variant="primary" onClick={onSaveSettings} disabled={savingSettings}>
+            {savingSettings ? 'Saving…' : 'Save email settings'}
+          </Button>
+        </div>
+
+        <div className="mt-6 border-t border-neutral-100 pt-4 text-sm dark:border-neutral-800">
+          <p className="font-medium text-neutral-700 dark:text-neutral-300">Weekly backup export</p>
+          <p className="mt-1 text-xs text-neutral-500 dark:text-neutral-400">
+            {latestWeeklyExport?.sentAt
+              ? `Last sent ${formatExportTimestamp(latestWeeklyExport.sentAt)}. `
+              : 'No export sent yet. '}
+            Sunday exports arrive in your inbox.
+          </p>
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function EmailRow({
+  message, previewLoading, approving, sending, onPreview, onApprove, onSendNow,
+}: {
+  message: EmailMessageRow;
+  previewLoading: boolean;
+  approving: boolean;
+  sending: boolean;
+  onPreview: () => void;
+  onApprove: () => void;
+  onSendNow: () => void;
+}) {
+  const canSendNow = SEND_NOW_STATES.includes(message.state);
+  const isRetry = message.state === 'failed';
+
+  return (
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-neutral-100 px-4 py-3 dark:border-neutral-800">
+      <div className="min-w-0">
+        <p className="text-sm font-medium text-neutral-900 dark:text-neutral-50">{message.label}</p>
+        <p className="mt-0.5 truncate text-xs text-neutral-500 dark:text-neutral-400">
+          {message.subject} &middot; {message.recipientsCount} recipient{message.recipientsCount === 1 ? '' : 's'}
+        </p>
+        {message.state === 'failed' && message.error && (
+          <p className={`mt-1 text-xs ${RED_TEXT_CLASS}`}>{message.error}</p>
+        )}
+      </div>
+      <div className="flex flex-none items-center gap-3">
+        <EmailStateChip message={message} />
+        <div className="flex items-center gap-3 text-sm">
+          <button
+            type="button"
+            onClick={onPreview}
+            disabled={previewLoading}
+            className="font-medium text-neutral-600 transition hover:underline disabled:opacity-50 dark:text-neutral-300"
+          >
+            {previewLoading ? 'Loading…' : 'Preview'}
+          </button>
+          {message.state === 'awaiting_approval' && (
+            <Button variant="ghost" tone="neutral" size="md" className="!px-0 !py-0" onClick={onApprove} disabled={approving}>
+              {approving ? 'Approving…' : 'Approve'}
+            </Button>
+          )}
+          {canSendNow && (
+            <Button variant="ghost" tone="brand" size="md" className="!px-0 !py-0" onClick={onSendNow} disabled={sending}>
+              {sending ? (isRetry ? 'Retrying…' : 'Sending…') : (isRetry ? 'Retry' : 'Send now')}
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Reuses PersonDialog's own focus-trap/Escape/restore-focus conventions
+// (Tab-trap scoped to this dialog's container; Escape + focus-restore are
+// handled by the parent, same split as PersonDialog/AdminClient).
+function EmailPreviewDialog({ subject, html, onClose }: { subject: string; html: string; onClose: () => void }) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    const container = dialogRef.current;
+    if (!container) return;
+
+    function focusableElements(): HTMLElement[] {
+      return Array.from(container!.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR));
+    }
+
+    function onKeyDown(e: KeyboardEvent) {
+      if (e.key !== 'Tab') return;
+      const focusable = focusableElements();
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      if (e.shiftKey) {
+        if (active === first || !container!.contains(active)) {
+          e.preventDefault();
+          last.focus();
+        }
+      } else if (active === last || !container!.contains(active)) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+
+    container.addEventListener('keydown', onKeyDown);
+    return () => container.removeEventListener('keydown', onKeyDown);
+  }, []);
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 px-4"
+      onClick={(e) => { if (e.target === e.currentTarget) onClose(); }}
+    >
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="email-preview-title"
+        className="flex max-h-[85vh] w-full max-w-2xl flex-col overflow-hidden rounded-2xl bg-white shadow-lg dark:bg-neutral-900"
+      >
+        <div className="flex items-center justify-between gap-3 border-b border-neutral-100 px-6 py-4 dark:border-neutral-800">
+          <div className="min-w-0">
+            <h2 id="email-preview-title" className="truncate text-lg font-semibold text-neutral-900 dark:text-neutral-50">
+              {subject}
+            </h2>
+            <p className="text-xs text-neutral-500 dark:text-neutral-400">Preview only &mdash; nothing sends from here.</p>
+          </div>
+          <Button type="button" variant="secondary" size="md" onClick={onClose} autoFocus>
+            Close
+          </Button>
+        </div>
+        <iframe
+          title="Email preview"
+          sandbox=""
+          srcDoc={html}
+          className="min-h-[60vh] w-full flex-1 bg-white"
+        />
+      </div>
     </div>
   );
 }
