@@ -135,7 +135,10 @@ describe('changeStatus', () => {
     for (const to of targets) {
       await changeStatus(db, { personId: mike.id, to, by: 'admin:test@example.com' });
       const open = await openMembershipsFor(db, mike.id);
-      expect(open.length).toBeLessThanOrEqual(1);
+      // Leadership convention: role row, NO open membership — so exactly 0
+      // there and exactly 1 everywhere else. Both directions are invariants;
+      // <=1 would let a zero-membership member slip through unnoticed.
+      expect(open.length).toBe(to === 'leadership' ? 0 : 1);
     }
     // Final state landed on 'member' with exactly one open row.
     const finalOpen = await openMembershipsFor(db, mike.id);
@@ -191,7 +194,7 @@ describe('changeStatus', () => {
     // first; the partial unique index guarantees at most one open row no
     // matter how the two calls interleaved.
     const open = await openMembershipsFor(db, mike.id);
-    expect(open.length).toBeLessThanOrEqual(1);
+    expect(open.length).toBe(1);
     expect(await leadershipRolesFor(db, mike.id)).toHaveLength(0);
   });
 });

@@ -14,7 +14,7 @@
 // for the exact reason getOrCreateRsvpToken is idempotent per
 // person+purpose+targetDate.
 
-import { and, desc, eq, inArray, isNull, lte, ne } from 'drizzle-orm';
+import { and, desc, eq, inArray, isNull, lte, ne, sql } from 'drizzle-orm';
 import { attendance, meetings, memberships, people, settings as settingsTable } from '@/db/schema';
 import type { Db } from '@/lib/db';
 import { OWNER_EMAIL, siteUrl } from './constants';
@@ -132,12 +132,17 @@ async function findPossibleRepeatVisitors(
   db: Db,
   visitorRows: Array<{ personId: string; email: string | null; fullName: string; displayName: string | null }>,
 ): Promise<string[]> {
-  const emails = Array.from(new Set(visitorRows.map((v) => v.email).filter((e): e is string => Boolean(e))));
+  // Case-insensitive throughout: emails are stored as-typed (kiosk touchscreens
+  // produce Jane@ vs jane@ freely), and suggestMatches set the lower() precedent
+  // for this exact same-person question.
+  const emails = Array.from(new Set(
+    visitorRows.map((v) => v.email?.toLowerCase()).filter((e): e is string => Boolean(e)),
+  ));
   if (emails.length === 0) return [];
 
   const emailMatches = await db.select({
     id: people.id, email: people.email, fullName: people.fullName, displayName: people.displayName,
-  }).from(people).where(inArray(people.email, emails));
+  }).from(people).where(inArray(sql`lower(${people.email})`, emails));
 
   const candidateIds = emailMatches.map((m) => m.id);
   const candidateVisitRows = candidateIds.length > 0
@@ -153,15 +158,16 @@ async function findPossibleRepeatVisitors(
   const candidatesByEmail = new Map<string, Array<{ id: string; name: string }>>();
   for (const m of emailMatches) {
     if (!m.email) continue;
-    const list = candidatesByEmail.get(m.email) ?? [];
+    const key = m.email.toLowerCase();
+    const list = candidatesByEmail.get(key) ?? [];
     list.push({ id: m.id, name: displayName(m) });
-    candidatesByEmail.set(m.email, list);
+    candidatesByEmail.set(key, list);
   }
 
   const notes: string[] = [];
   for (const v of visitorRows) {
     if (!v.email) continue;
-    const match = (candidatesByEmail.get(v.email) ?? [])
+    const match = (candidatesByEmail.get(v.email.toLowerCase()) ?? [])
       .find((other) => other.id !== v.personId && (visitCountById.get(other.id) ?? 0) >= 2);
     if (match) {
       const priorVisits = visitCountById.get(match.id) ?? 0;
