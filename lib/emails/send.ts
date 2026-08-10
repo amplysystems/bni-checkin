@@ -18,12 +18,17 @@ import { generateMeetingIcs } from './ics';
 import { OWNER_EMAIL } from './constants';
 
 export type SendableMessage = {
-  type: 'leadership_report' | 'visitor_thankyou';
+  type: 'leadership_report' | 'visitor_thankyou' | 'approval_notice' | 'weekly_export';
   sendKey: string;
   recipients: string[];
   subject: string;
   html: string;
   text?: string | null;
+  // Explicit attachments override the type-based default below (only
+  // visitor_thankyou auto-attaches a calendar invite) — used by the weekly
+  // export (lib/emails/export.ts), whose JSON dump isn't tied to any
+  // calendar event and has nothing to do with icsAttachment().
+  attachments?: Array<{ filename: string; content: string }>;
 };
 
 export type SendResult = { providerMessageId: string };
@@ -76,8 +81,11 @@ function icsAttachment(now: Date): { filename: string; content: string } {
 export async function sendEmailMessage(message: SendableMessage, now: Date = new Date()): Promise<SendResult> {
   const safed = applySafeMode(message);
   // Both visitor email variants (v1 thank-you and v2 conversion) get the
-  // invite attached — the leadership report doesn't need one.
-  const attachments = message.type === 'visitor_thankyou' ? [icsAttachment(now)] : undefined;
+  // invite attached automatically — the leadership report, approval
+  // notice, and weekly export don't. An explicit `attachments` (weekly
+  // export's JSON dump) always wins over this default.
+  const attachments = message.attachments
+    ?? (message.type === 'visitor_thankyou' ? [icsAttachment(now)] : undefined);
 
   const res = await fetch(RESEND_API_URL, {
     method: 'POST',

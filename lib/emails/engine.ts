@@ -10,11 +10,14 @@
 // This module owns ALL email_messages state/timestamp writes; lib/emails/
 // send.ts is deliberately DB-free and only performs the Resend fetch.
 
-import { and, eq, notInArray } from 'drizzle-orm';
+import { and, eq, lt, notInArray } from 'drizzle-orm';
 import { emailMessages, meetings, settings as settingsTable, type EmailMessage } from '@/db/schema';
 import type { Db } from '@/lib/db';
 import { chicagoTimeToUtc } from '@/lib/time';
-import { compileForMeeting } from './compile';
+import { approvalNoticeHtml, approvalNoticeSubject } from '@/emails/approval-notice';
+import { compileForMeeting, formatMeetingDateLabel } from './compile';
+import { OWNER_EMAIL, siteUrl } from './constants';
+import { approvalNoticeSendKey } from './send-keys';
 import { sendEmailMessage, type SendableMessage } from './send';
 
 export type EmailState = EmailMessage['state'];
@@ -177,7 +180,7 @@ export async function executeDue(db: Db, now: Date = new Date()): Promise<EmailM
 // the actual structural double-send guard for the scheduled path.
 async function claimAndSend(db: Db, id: string): Promise<EmailMessage | null> {
   const [claimed] = await db.update(emailMessages)
-    .set({ state: 'sending' })
+    .set({ state: 'sending', sendingAt: new Date() })
     .where(and(eq(emailMessages.id, id), eq(emailMessages.state, 'scheduled')))
     .returning();
   if (!claimed) return null;
@@ -190,7 +193,7 @@ async function claimAndSend(db: Db, id: string): Promise<EmailMessage | null> {
 // double-click) can't both win.
 async function claimFromAnyPreSendState(db: Db, id: string): Promise<EmailMessage | null> {
   const [claimed] = await db.update(emailMessages)
-    .set({ state: 'sending' })
+    .set({ state: 'sending', sendingAt: new Date() })
     .where(and(eq(emailMessages.id, id), notInArray(emailMessages.state, INFLIGHT_OR_TERMINAL)))
     .returning();
   return claimed ?? null;
@@ -238,4 +241,77 @@ async function sendWithRetry(db: Db, id: string, alreadyClaimed?: EmailMessage):
     .where(eq(emailMessages.id, id))
     .returning();
   return failed;
+}
+
+const STALE_SENDING_MINUTES = 10;
+
+// P2-3 review carry-in: the crash-mid-send recovery the engine otherwise
+// lacks. A message stuck in 'sending' (the process died between claiming it
+// and recording sent/failed) would hold that state forever — both claim
+// guards above (claimAndSend, claimFromAnyPreSendState) deliberately
+// EXCLUDE 'sending' from what they'll (re)claim, precisely so two live
+// attempts can never overlap. That correctness property becomes a
+// liability without a reaper: nothing would ever pick the row back up.
+// Reclaiming it into 'failed' (not straight back to 'scheduled' — a
+// send attempt may have actually reached Resend before the crash;
+// 'failed' surfaces it for a deliberate manual retry via sendNow rather
+// than silently re-attempting) reopens it to every existing retry path.
+// error='stale-reclaimed' distinguishes this from a real Resend failure
+// in the dashboard/logs.
+//
+// The WHERE clause (state='sending' AND sendingAt older than the cutoff)
+// IS the state-guard the task calls for: two overlapping reaper calls (or
+// a reaper racing a send that legitimately finishes mid-sweep) can each
+// only reclaim a row that is STILL 'sending' with a STILL-stale sendingAt
+// at the moment their own UPDATE runs — a row that already resolved to
+// sent/failed between read and write matches zero rows for the loser.
+export async function reapStaleSending(db: Db, now: Date = new Date()): Promise<EmailMessage[]> {
+  const staleBefore = new Date(now.getTime() - STALE_SENDING_MINUTES * 60_000);
+  return db.update(emailMessages)
+    .set({ state: 'failed', error: 'stale-reclaimed' })
+    .where(and(eq(emailMessages.state, 'sending'), lt(emailMessages.sendingAt, staleBefore)))
+    .returning();
+}
+
+// P2-3 review carry-in: while approve-mode is on, Jason gets exactly one
+// "drafts ready to approve" email per meeting — fired by the cron tick
+// (lib/emails/tick.ts) the first time it finds this meeting's drafts
+// sitting in 'awaiting_approval'. Idempotency mirrors createDrafts' own
+// pattern exactly: an INSERT ... ON CONFLICT DO NOTHING on send_key
+// (approvalNoticeSendKey) is the ONLY thing standing between "never sent"
+// and "sent" — if the insert is a no-op (a previous tick already created
+// this row, whether it went on to send, fail, or is still in flight), this
+// call is a no-op too. There is deliberately no separate "already sent?"
+// check: the insert's own uniqueness IS the check, and doing it any other
+// way would reopen a window for two overlapping ticks to both decide
+// "not yet sent" and both fire.
+//
+// approveMode OFF short-circuits before touching the DB at all — nothing
+// ever sits in 'awaiting_approval' in that mode, so there is nothing to
+// notify about.
+export async function ensureApprovalNotice(db: Db, meetingId: string): Promise<EmailMessage | null> {
+  const settingsRow = await getSettings(db);
+  if (!settingsRow.approveMode) return null;
+
+  const [awaitingApproval] = await db.select({ id: emailMessages.id }).from(emailMessages)
+    .where(and(eq(emailMessages.meetingId, meetingId), eq(emailMessages.state, 'awaiting_approval')))
+    .limit(1);
+  if (!awaitingApproval) return null;
+
+  const [meeting] = await db.select().from(meetings).where(eq(meetings.id, meetingId));
+  if (!meeting) throw new EngineError('meeting_not_found');
+  const meetingDateLabel = formatMeetingDateLabel(meeting.meetingDate);
+
+  const [inserted] = await db.insert(emailMessages).values({
+    sendKey: approvalNoticeSendKey(meetingId),
+    type: 'approval_notice',
+    meetingId,
+    recipients: [OWNER_EMAIL],
+    subject: approvalNoticeSubject(meetingDateLabel),
+    bodySnapshot: approvalNoticeHtml({ meetingDateLabel, siteUrl: siteUrl() }),
+    state: 'draft',
+  }).onConflictDoNothing({ target: emailMessages.sendKey }).returning();
+
+  if (!inserted) return null; // already created by an earlier tick — never re-fire
+  return sendWithRetry(db, inserted.id);
 }

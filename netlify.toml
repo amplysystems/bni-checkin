@@ -6,3 +6,12 @@
 
 [[plugins]]
   package = "@netlify/plugin-nextjs"
+
+# netlify/functions is already Netlify's documented default functions
+# directory (no config needed for auto-discovery), and it's confirmed to
+# coexist with @netlify/plugin-nextjs's own generated functions without
+# conflict. Pinned explicitly anyway (Task 4, email-cron.mts +
+# weekly-export.mts) purely for reviewability — so "where do scheduled
+# functions live" is answered in this file, not just tribal knowledge.
+[functions]
+  directory = "netlify/functions"

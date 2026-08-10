@@ -60,7 +60,10 @@ function firstNameOf(full: string): string {
   return full.trim().split(/\s+/)[0] || full;
 }
 
-function formatMeetingDateLabel(dateStr: string): string {
+// Exported so lib/emails/engine.ts's ensureApprovalNotice can label its
+// notification with the same human-readable date format the leadership
+// report and visitor emails already use, without duplicating the format.
+export function formatMeetingDateLabel(dateStr: string): string {
   const [y, m, d] = dateStr.split('-').map(Number);
   const dt = new Date(Date.UTC(y, m - 1, d));
   return new Intl.DateTimeFormat('en-US', {

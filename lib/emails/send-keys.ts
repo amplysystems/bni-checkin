@@ -23,3 +23,10 @@ export function leadershipReportSendKey(meetingId: string): string {
 export function visitorThankyouSendKey(meetingId: string, personId: string): string {
   return `${meetingId}:visitor_thankyou:${personId}`;
 }
+
+// One per meeting, matching the plan's literal `{meetingId}:approval_notice`
+// — lib/emails/engine.ts's ensureApprovalNotice relies on this being unique
+// per meeting for the "second tick can't re-send" idempotency guarantee.
+export function approvalNoticeSendKey(meetingId: string): string {
+  return `${meetingId}:approval_notice`;
+}

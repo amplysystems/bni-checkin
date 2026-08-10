@@ -83,7 +83,12 @@ export const rateLimits = pgTable('rate_limits', {
 export const emailMessages = pgTable('email_messages', {
   id: uuid('id').primaryKey().defaultRandom(),
   sendKey: text('send_key').notNull().unique(),
-  type: text('type', { enum: ['leadership_report', 'visitor_thankyou'] }).notNull(),
+  // 'approval_notice' (Phase 2 Task 4 / P2-3 carry-in): the one-time
+  // "drafts ready to approve" email to the owner, created + sent by
+  // lib/emails/engine.ts's ensureApprovalNotice — a real email_messages row
+  // (not a side-channel notification) so its send_key gives it the exact
+  // same double-send-is-impossible guarantee as everything else.
+  type: text('type', { enum: ['leadership_report', 'visitor_thankyou', 'approval_notice'] }).notNull(),
   meetingId: uuid('meeting_id').references(() => meetings.id),
   recipients: jsonb('recipients').$type<string[]>().notNull(),
   subject: text('subject').notNull(),
@@ -94,11 +99,17 @@ export const emailMessages = pgTable('email_messages', {
   providerMessageId: text('provider_message_id'),
   approvedBy: text('approved_by'),
   approvedAt: timestamp('approved_at', { withTimezone: true }),
+  // Stamped the instant a row is claimed into 'sending' (both claimAndSend
+  // and claimFromAnyPreSendState in lib/emails/engine.ts set it). Exists
+  // solely so the cron tick's stale-sending reaper (reapStaleSending) can
+  // tell "just started sending" from "died mid-send 20 minutes ago" —
+  // nothing else reads it.
+  sendingAt: timestamp('sending_at', { withTimezone: true }),
   sentAt: timestamp('sent_at', { withTimezone: true }),
   error: text('error'),
   createdAt: timestamp('created_at', { withTimezone: true }).notNull().defaultNow(),
 }, (t) => [
-  check('email_messages_type_check', sql`${t.type} IN ('leadership_report', 'visitor_thankyou')`),
+  check('email_messages_type_check', sql`${t.type} IN ('leadership_report', 'visitor_thankyou', 'approval_notice')`),
   check(
     'email_messages_state_check',
     sql`${t.state} IN ('draft', 'awaiting_approval', 'approved', 'scheduled', 'sending', 'sent', 'failed')`,

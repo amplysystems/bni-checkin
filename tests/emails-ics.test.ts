@@ -61,15 +61,30 @@ describe('generateMeetingIcs', () => {
     expect((ics.match(/BEGIN:VEVENT/g) ?? []).length).toBe(1);
   });
 
-  it('DTSTART/DTEND carry the TZID=America/Chicago param at 15:30-16:30 on next Wednesday', () => {
+  it('DTSTART/DTEND are UTC (Z-suffix) at 15:30-16:30 CT on next Wednesday, CDT offset (summer, UTC-5)', () => {
     const ics = generateMeetingIcs({ now: new Date('2026-08-10T15:00:00Z') }); // Monday -> 2026-08-12
-    expect(ics).toContain('DTSTART;TZID=America/Chicago:20260812T153000');
-    expect(ics).toContain('DTEND;TZID=America/Chicago:20260812T163000');
+    expect(ics).toContain('DTSTART:20260812T203000Z');
+    expect(ics).toContain('DTEND:20260812T213000Z');
+    // Hardened away from the old naked-TZID convention entirely.
+    expect(ics).not.toContain('TZID');
+    expect(ics).not.toMatch(/DTSTART;/);
+    expect(ics).not.toMatch(/DTEND;/);
+  });
+
+  it('DTSTART/DTEND resolve the correct UTC offset in CST (winter, UTC-6) — both DST offsets covered', () => {
+    // 2026-01-07 (a Wednesday) is well inside standard time (DST doesn't
+    // start until 2026-03-08). 15:30 CT = 21:30 UTC in CST, one hour later
+    // than the CDT case above at the identical wall-clock time — proof the
+    // conversion is DST-aware, not a hardcoded offset.
+    const ics = generateMeetingIcs({ now: new Date('2026-01-05T15:00:00Z'), meetingDateStr: '2026-01-07' });
+    expect(ics).toContain('DTSTART:20260107T213000Z');
+    expect(ics).toContain('DTEND:20260107T223000Z');
+    expect(ics).not.toContain('TZID');
   });
 
   it('meetingDateStr overrides the computed date', () => {
     const ics = generateMeetingIcs({ now: new Date('2026-08-10T15:00:00Z'), meetingDateStr: '2026-09-02' });
-    expect(ics).toContain('DTSTART;TZID=America/Chicago:20260902T153000');
+    expect(ics).toContain('DTSTART:20260902T203000Z');
   });
 
   it('escapes commas and semicolons in LOCATION per RFC 5545', () => {

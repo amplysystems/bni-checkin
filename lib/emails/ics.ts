@@ -11,17 +11,21 @@
 // canceled/rescheduled week; single non-recurring events keep
 // cancellations honest, per the plan.
 //
-// TZID convention: DTSTART/DTEND use `;TZID=America/Chicago:` floating
-// local time WITHOUT an embedded VTIMEZONE component. Strictly, RFC 5545
-// wants a VTIMEZONE block defining the IANA zone's offset/DST rules; in
-// practice every mainstream client (Gmail, Apple Calendar, Outlook.com/
-// desktop) resolves well-known IANA TZIDs directly and renders the correct
-// wall-clock time without one. A full VTIMEZONE (with its own RRULE for
-// DST transitions) is meaningful extra surface for a single-event,
-// non-recurring invite — skipped here; revisit if a recipient's client
-// ever mis-renders the time.
+// UTC hardening (Task 4 P2-3 review carry-in): DTSTART/DTEND are UTC
+// instants with a Z suffix, computed via lib/time.ts's chicagoTimeToUtc
+// (DST-safe — it resolves the correct America/Chicago offset for the
+// given calendar date). Previously this used a naked local
+// `;TZID=America/Chicago:` time with no embedded VTIMEZONE block; every
+// mainstream modern client (Gmail, Apple Calendar, Outlook.com) resolves
+// well-known IANA TZIDs fine without one, but some Outlook builds
+// (particularly older desktop versions, "classic Outlook") are known to
+// mis-render a bare TZID param that isn't backed by a VTIMEZONE
+// component. UTC has zero ambiguity — no client needs to resolve a
+// timezone name at all — so it's the safer choice for an invite going to
+// visitors using unknown mail clients, at the one-time cost (paid here,
+// not by every reader) of doing the DST-aware conversion ourselves.
 
-import { CHAPTER_TZ, MEETING_START_TIME, chicagoWallClock } from '@/lib/time';
+import { MEETING_START_TIME, chicagoTimeToUtc, chicagoWallClock } from '@/lib/time';
 
 export const MEETING_SUMMARY = 'BNI Wheeling weekly meeting';
 export const MEETING_LOCATION = 'Devon Bank, 561 N Milwaukee Ave, Wheeling, IL 60090';
@@ -74,11 +78,6 @@ function escapeIcsText(s: string): string {
     .replace(/\r\n|\r|\n/g, '\\n');
 }
 
-function localDateTimeStamp(dateStr: string, hhmm: string): string {
-  const [h, m] = hhmm.split(':');
-  return `${dateStr.replace(/-/g, '')}T${h.padStart(2, '0')}${m.padStart(2, '0')}00`;
-}
-
 function addMinutesToHhmm(hhmm: string, minutes: number): string {
   const [h, m] = hhmm.split(':').map(Number);
   const total = h * 60 + m + minutes;
@@ -103,8 +102,8 @@ export type MeetingIcsInput = {
 export function generateMeetingIcs(input: MeetingIcsInput = {}): string {
   const now = input.now ?? new Date();
   const dateStr = input.meetingDateStr ?? nextWednesday(now);
-  const startLocal = localDateTimeStamp(dateStr, MEETING_START_TIME);
-  const endLocal = localDateTimeStamp(dateStr, addMinutesToHhmm(MEETING_START_TIME, MEETING_DURATION_MINUTES));
+  const startUtc = chicagoTimeToUtc(dateStr, MEETING_START_TIME);
+  const endUtc = chicagoTimeToUtc(dateStr, addMinutesToHhmm(MEETING_START_TIME, MEETING_DURATION_MINUTES));
   // Deterministic per-date UID (not random): re-generating the ics for the
   // same target meeting date — e.g. the v1 and v2 thank-you both attach one
   // for the same upcoming Wednesday — produces the identical UID, so a
@@ -121,8 +120,8 @@ export function generateMeetingIcs(input: MeetingIcsInput = {}): string {
     'BEGIN:VEVENT',
     `UID:${uid}`,
     `DTSTAMP:${utcTimeStamp(now)}`,
-    `DTSTART;TZID=${CHAPTER_TZ}:${startLocal}`,
-    `DTEND;TZID=${CHAPTER_TZ}:${endLocal}`,
+    `DTSTART:${utcTimeStamp(startUtc)}`,
+    `DTEND:${utcTimeStamp(endUtc)}`,
     `SUMMARY:${escapeIcsText(MEETING_SUMMARY)}`,
     `LOCATION:${escapeIcsText(MEETING_LOCATION)}`,
     `DESCRIPTION:${escapeIcsText(MEETING_DESCRIPTION)}`,
