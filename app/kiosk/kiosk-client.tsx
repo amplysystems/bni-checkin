@@ -271,8 +271,23 @@ function RailAmplyFooter() {
 // same dayOfYear() selection already used for the daily ad (dailyAdSrc in
 // KioskClient below), so it changes once a day rather than per render.
 function CampaignLine({ index }: { index: number }) {
+  // text-2xl, not text-3xl: measured live against this 300px rail's usable
+  // width (236px) — at text-3xl, "One plumber." (the shortest of the three
+  // scripted lines) still wraps mid-phrase into "One" / "plumber." on two
+  // lines, since Unbounded is noticeably wider than the Archivo this
+  // replaced (see app/layout.tsx). text-2xl keeps every line of both
+  // rotating variants' shorter phrases on one line; the longer phrases in
+  // the second variant ("The best opportunities" / "They're across the
+  // table.") are long enough in plain English that they still wrap even at
+  // this size — that's a copy-length issue, not something a font-size
+  // tweak alone can fully solve, and rewriting the approved campaign copy
+  // is out of scope here.
+  //
+  // font-black (900), not font-extrabold (800) — only 700/900 are loaded
+  // for Unbounded (see app/layout.tsx), so 800 isn't an actual loaded
+  // weight.
   const className =
-    'font-display text-3xl font-extrabold leading-tight tracking-tight text-neutral-50';
+    'font-display text-2xl font-black leading-tight tracking-tight text-neutral-50';
   if (index % 2 === 0) {
     return (
       <p className={className}>
@@ -356,7 +371,17 @@ function KioskRail({ roster, clock }: { roster: RosterResponse | null; clock: st
       </div>
 
       <div className="mt-14">
-        <p className="font-display text-6xl font-extrabold tracking-tight text-neutral-50">{clock}</p>
+        {/* text-4xl, not text-6xl: Unbounded is noticeably wider than
+            Archivo was (see app/layout.tsx). Measured live against this
+            300px rail's usable width (300px minus the rail's own px-8
+            padding = 236px): text-6xl and text-5xl both wrap a double-digit
+            hour + "PM" onto two lines ("10:08" / "PM"), which is exactly the
+            broken-looking reflow a live-updating clock must never do.
+            text-4xl is the largest size that keeps every hour on one line —
+            the widest measured ("10:00 AM") renders at ~217px, ~19px of
+            room to spare. font-black (900), not font-extrabold (800), for
+            the same loaded-weight reason as CampaignLine above. */}
+        <p className="font-display text-4xl font-black tracking-tight text-neutral-50">{clock}</p>
         {roster && (
           <p className="mt-2 text-sm text-neutral-400">{formatMeetingDate(roster.meetingDate)}</p>
         )}
@@ -871,7 +896,12 @@ function GridView({
         <h1 className="mt-6 font-display text-2xl font-bold tracking-tight text-neutral-900 dark:text-neutral-50">
           {roster?.greeting ?? 'Welcome'}
         </h1>
-        <p className="mt-1.5 text-neutral-500 dark:text-neutral-400">Tap your name to check in</p>
+        {/* md:text-lg: a one-step bump on the iPad kiosk (see the
+            member-card / search-input sizing comments below for the same
+            treatment) — least-technical-user legibility pass. */}
+        <p className="mt-1.5 text-neutral-500 dark:text-neutral-400 md:text-lg">
+          Tap your name below to check in
+        </p>
 
         <div className="mt-6">
           <input
@@ -879,15 +909,16 @@ function GridView({
             inputMode="search"
             value={query}
             onChange={(e) => setQuery(e.target.value)}
-            placeholder="Search your name"
+            placeholder="Type your name to find it faster"
             aria-label="Search your name"
-            className="min-h-[56px] w-full rounded-2xl border border-neutral-200 bg-white px-5 text-base text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-600"
+            className="min-h-[56px] w-full rounded-2xl border border-neutral-200 bg-white px-5 text-base text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-600 md:text-lg"
           />
         </div>
 
         {rosterError && (
           <div className="mt-8 rounded-2xl bg-white p-8 text-center text-neutral-500 shadow-sm dark:bg-neutral-900 dark:text-neutral-400">
-            Can&apos;t reach the roster — check the connection
+            <p>Can&apos;t reach the roster — check the connection</p>
+            <p className="mt-1">Ask a member for help.</p>
           </div>
         )}
 
@@ -904,8 +935,17 @@ function GridView({
           </div>
         )}
 
+        {/* A Unicode non-breaking space (not a plain space) sits between
+            "Welcome" and the arrow below — measured live at 375px width
+            now that Button's primary variant renders font-display
+            font-bold (see components/ui/button.tsx): this line wraps at
+            that width, and a plain space let the browser strand the
+            arrow alone on its own second line. The non-breaking space
+            keeps "Welcome →" as one unbreakable unit, so it wraps as a
+            whole phrase ("First time here?" / "Welcome →") instead of
+            orphaning a lone glyph. */}
         <Button variant="primary" size="lg" fullWidth onClick={onOpenVisitorForm} className="mt-10">
-          First time here? Welcome →
+          First time here? Welcome{' '}→
         </Button>
 
         {/* md+: this content already lives at the bottom of KioskRail
@@ -928,29 +968,54 @@ function MemberCard({ member, pending, onTap }: { member: Member; pending: boole
       type="button"
       disabled={checkedIn || pending}
       onClick={onTap}
-      className="flex min-h-[64px] flex-col items-center gap-2 rounded-2xl bg-white p-4 text-center shadow-sm transition active:scale-[0.98] disabled:active:scale-100 dark:bg-neutral-900"
+      // opacity-80 while pending: a slow venue wifi request must FEEL
+      // alive, not just spin silently — this plus the "One moment…" swap
+      // below give a tapped card a visible in-flight state instead of just
+      // disabling with no other feedback.
+      className={`flex min-h-[64px] flex-col items-center gap-2 rounded-2xl bg-white p-4 text-center shadow-sm transition active:scale-[0.98] disabled:active:scale-100 dark:bg-neutral-900 ${
+        pending ? 'opacity-80' : ''
+      }`}
     >
       <span
         className={`flex h-14 w-14 items-center justify-center rounded-full text-lg font-semibold ${
           checkedIn
             ? 'bg-green-100 text-green-600 dark:bg-green-900/40 dark:text-green-400'
             : 'bg-neutral-100 text-neutral-600 dark:bg-neutral-800 dark:text-neutral-300'
-        } ${pending ? 'opacity-50' : ''}`}
+        }`}
       >
         {checkedIn ? <CheckMark className="h-6 w-6" /> : getInitials(name)}
       </span>
-      <span className="line-clamp-1 text-sm font-medium text-neutral-900 dark:text-neutral-50">{name}</span>
+      {/* text-base md:text-lg — up from text-sm, part of the iPad-kiosk
+          legibility pass; line-clamp-1 (unchanged) keeps a single line
+          regardless of size, so the bump can't push a card taller than its
+          neighbors — verified against the longest roster name, "Anthony
+          Gillette". */}
+      <span className="line-clamp-1 text-base font-medium text-neutral-900 dark:text-neutral-50 md:text-lg">
+        {name}
+      </span>
       {checkedIn ? (
-        // green-700 (not the -600 used above for the avatar) — at 12px text
-        // this label needs the darker shade to clear WCAG AA 4.5:1 in light
-        // mode; the dark-mode pairing (green-400 on a near-black page) was
-        // already compliant, so it's untouched.
-        <span className="text-xs font-medium text-green-700 dark:text-green-400">
+        // text-xs, deliberately NOT bumped alongside the industry line
+        // below — measured live: at text-sm this wraps to two lines on a
+        // narrow mobile card ("Checked in · 9:34" / "PM"), making
+        // checked-in cards taller than their neighbors. line-clamp-1 is a
+        // belt-and-suspenders truncation guard in case a future longer
+        // "checked in by" phrasing runs long even at this size.
+        //
+        // green-700 (not the -600 used above for the avatar) — at this text
+        // size this label needs the darker shade to clear WCAG AA 4.5:1 in
+        // light mode; the dark-mode pairing (green-400 on a near-black
+        // page) was already compliant, so it's untouched.
+        <span className="line-clamp-1 text-xs font-medium text-green-700 dark:text-green-400">
           Checked in · {formatTime(member.checkedInAt!)}
         </span>
+      ) : pending ? (
+        <span className="line-clamp-1 text-sm text-neutral-500 dark:text-neutral-400">One moment…</span>
       ) : (
         member.industry && (
-          <span className="line-clamp-1 text-xs text-neutral-500 dark:text-neutral-400">{member.industry}</span>
+          // text-sm, up from text-xs — same legibility pass as the name
+          // above; verified against the longest roster industry, "Business
+          // consulting".
+          <span className="line-clamp-1 text-sm text-neutral-500 dark:text-neutral-400">{member.industry}</span>
         )
       )}
     </button>
@@ -1027,6 +1092,14 @@ function SplashView({
             would fall short of 4.5:1 there; -200 clears it with margin). */}
         <p className="mt-2 text-neutral-200">
           Checked in at {formatTime(info.checkedInAt)}
+        </p>
+        {/* Confirmation-strength line for the least-technical-user lens —
+            spells out that there's nothing left to do, in plain warm
+            language rather than a cute tagline. Same text-neutral-200 as
+            the line above (already measured to clear 4.5:1 against the
+            scrim+ad composite, see that comment), just smaller. */}
+        <p className="mt-1 text-sm text-neutral-200">
+          You can put the iPad down — you&apos;re done.
         </p>
         {/* !text-[#F0595F]: overrides Button's ghost/brand tone, which
             normally pairs text-[#CF2030] (light) with dark:text-[#F0595F] —
@@ -1134,9 +1207,11 @@ function VisitorFormView({
             </h1>
 
             {error && (
+              // text-base, not text-sm — least-technical-user lens: an
+              // error message is exactly the wrong place to shrink text.
               <div
                 style={{ color: BRAND_RED }}
-                className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm dark:bg-red-950/40"
+                className="mt-4 rounded-xl bg-red-50 px-4 py-3 text-base dark:bg-red-950/40"
               >
                 {error}
               </div>
@@ -1257,7 +1332,7 @@ function ReturningSearchView({
           onChange={(e) => setQuery(e.target.value)}
           placeholder="Start typing your name"
           aria-label="Search your name"
-          className="mt-6 min-h-[56px] w-full rounded-2xl border border-neutral-200 bg-white px-5 text-base text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-600"
+          className="mt-6 min-h-[56px] w-full rounded-2xl border border-neutral-200 bg-white px-5 text-base text-neutral-900 shadow-sm outline-none placeholder:text-neutral-400 focus:border-neutral-400 dark:border-neutral-800 dark:bg-neutral-900 dark:text-neutral-50 dark:placeholder:text-neutral-500 dark:focus:border-neutral-600 md:text-lg"
         />
 
         <div className="mt-6 flex flex-col gap-3">

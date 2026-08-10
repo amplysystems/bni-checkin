@@ -36,6 +36,26 @@ type AttendanceRow = {
 
 type AttendanceResponse = { meetingDate: string; attendance: AttendanceRow[] };
 
+type MeetingAttendee = {
+  personId: string;
+  fullName: string;
+  kind: 'member' | 'leadership' | 'visitor';
+  visitNumber: number | null;
+};
+
+type AdminMeeting = {
+  id: string;
+  meetingDate: string;
+  status: string;
+  total: number;
+  memberCount: number;
+  leadershipCount: number;
+  visitorCount: number;
+  attendees: MeetingAttendee[];
+};
+
+type MeetingsResponse = { meetings: AdminMeeting[] };
+
 type CreateStatus = 'member' | 'leadership' | 'visitor';
 
 type PersonFormState = {
@@ -54,7 +74,7 @@ const emptyForm: PersonFormState = {
 type DialogState = { mode: 'create' } | { mode: 'edit'; person: AdminPerson } | null;
 
 type LoadResult =
-  | { ok: true; people: AdminPerson[]; attendance: AttendanceRow[]; meetingDate: string }
+  | { ok: true; people: AdminPerson[]; attendance: AttendanceRow[]; meetingDate: string; meetings: AdminMeeting[] }
   | { ok: false };
 
 const GENERIC_ERROR = 'Something went wrong — try again.';
@@ -177,6 +197,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [people, setPeople] = useState<AdminPerson[] | null>(null);
   const [attendance, setAttendance] = useState<AttendanceRow[] | null>(null);
   const [meetingDate, setMeetingDate] = useState<string | null>(null);
+  const [meetings, setMeetings] = useState<AdminMeeting[] | null>(null);
   const [loadError, setLoadError] = useState(false);
   const [showDeactivated, setShowDeactivated] = useState(false);
 
@@ -208,29 +229,42 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   }, []);
 
   // ---- Data loading ----
-  // Both endpoints are fetched together on mount, whenever the "show
+  // All three endpoints are fetched together on mount, whenever the "show
   // deactivated" toggle changes, and again after every mutation (attendance
-  // toggle, person save, deactivate/reactivate). Those call sites don't
-  // coordinate with each other — a chip tap and a Deactivate click can both
-  // be in flight at once — so a slow response from an earlier request must
-  // never clobber a fresher one. loadRequestIdRef is a monotonic counter
-  // shared by every call: each request stamps its eventual response with the
-  // counter value at issue time, and applyLoadResult discards any response
-  // whose stamp no longer matches the current counter. Ported from the same
-  // pattern in app/kiosk/kiosk-client.tsx.
+  // toggle, person save, deactivate/reactivate, meeting mutations). Those
+  // call sites don't coordinate with each other — a chip tap and a
+  // Deactivate click can both be in flight at once — so a slow response from
+  // an earlier request must never clobber a fresher one. loadRequestIdRef is
+  // a monotonic counter shared by every call: each request stamps its
+  // eventual response with the counter value at issue time, and
+  // applyLoadResult discards any response whose stamp no longer matches the
+  // current counter. Ported from the same pattern in
+  // app/kiosk/kiosk-client.tsx.
+  //
+  // meetings folds into this same Promise.all + request-id guard (rather
+  // than its own effect) so the Meetings panel refreshes for free whenever
+  // the Today panel's counts change — no separate fetch wiring needed.
   const loadRequestIdRef = useRef(0);
 
   const fetchAdminData = useCallback(async (includeDeactivated: boolean): Promise<LoadResult> => {
     try {
       const rosterUrl = includeDeactivated ? '/api/admin/roster?includeDeactivated=1' : '/api/admin/roster';
-      const [rosterRes, attRes] = await Promise.all([
+      const [rosterRes, attRes, meetingsRes] = await Promise.all([
         fetch(rosterUrl),
         fetch('/api/admin/attendance'),
+        fetch('/api/admin/meetings'),
       ]);
-      if (!rosterRes.ok || !attRes.ok) return { ok: false };
+      if (!rosterRes.ok || !attRes.ok || !meetingsRes.ok) return { ok: false };
       const rosterData = (await rosterRes.json()) as RosterResponse;
       const attData = (await attRes.json()) as AttendanceResponse;
-      return { ok: true, people: rosterData.people, attendance: attData.attendance, meetingDate: attData.meetingDate };
+      const meetingsData = (await meetingsRes.json()) as MeetingsResponse;
+      return {
+        ok: true,
+        people: rosterData.people,
+        attendance: attData.attendance,
+        meetingDate: attData.meetingDate,
+        meetings: meetingsData.meetings,
+      };
     } catch {
       return { ok: false };
     }
@@ -242,6 +276,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
       setPeople(result.people);
       setAttendance(result.attendance);
       setMeetingDate(result.meetingDate);
+      setMeetings(result.meetings);
       setLoadError(false);
     } else {
       setLoadError(true);
@@ -443,13 +478,13 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
             </div>
           )}
 
-          {!loadError && (people === null || attendance === null) && (
+          {!loadError && (people === null || attendance === null || meetings === null) && (
             <div className="mt-8 rounded-2xl bg-white p-8 text-center text-neutral-500 shadow-sm dark:bg-neutral-900 dark:text-neutral-400">
               Loading…
             </div>
           )}
 
-          {!loadError && people !== null && attendance !== null && (
+          {!loadError && people !== null && attendance !== null && meetings !== null && (
             <>
               <TodayPanel
                 people={activePeople}
@@ -468,6 +503,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
                 onDeactivate={handleDeactivate}
                 onReactivate={handleReactivate}
               />
+              <MeetingsPanel meetings={meetings} todayDate={meetingDate} />
             </>
           )}
         </div>
@@ -690,6 +726,149 @@ function RosterRow({
         )}
       </td>
     </tr>
+  );
+}
+
+// ---- Meetings panel (option B "Meeting list") ------------------------------
+
+// 1st / 2nd / 3rd / 4th… — used for the visitor roll's "(Nth visit)" markers
+// inside an expanded meeting row.
+function ordinal(n: number): string {
+  const rem100 = n % 100;
+  if (rem100 >= 11 && rem100 <= 13) return `${n}th`;
+  switch (n % 10) {
+    case 1: return `${n}st`;
+    case 2: return `${n}nd`;
+    case 3: return `${n}rd`;
+    default: return `${n}th`;
+  }
+}
+
+function ChevronIcon({ expanded }: { expanded: boolean }) {
+  return (
+    <svg
+      viewBox="0 0 24 24" fill="none" aria-hidden="true"
+      className={`h-4 w-4 flex-none text-neutral-400 transition-transform duration-150 dark:text-neutral-500 ${
+        expanded ? 'rotate-90' : ''
+      }`}
+    >
+      <path d="M9 6l6 6-6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function MeetingsPanel({ meetings, todayDate }: { meetings: AdminMeeting[]; todayDate: string | null }) {
+  // Local, ephemeral UI state (which rows are expanded) — deliberately not
+  // lifted to AdminClient: nothing else needs it, and it's fine for it to
+  // reset if this component ever unmounts. It does, however, survive the
+  // refetch that follows every attendance mutation (loadAll re-runs, but
+  // MeetingsPanel itself stays mounted and just receives a new `meetings`
+  // prop), so expanding a row and then toggling someone's check-in in the
+  // Today panel above doesn't collapse it back.
+  const [expandedIds, setExpandedIds] = useState<Set<string>>(new Set());
+
+  const toggle = useCallback((id: string) => {
+    setExpandedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id); else next.add(id);
+      return next;
+    });
+  }, []);
+
+  return (
+    <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm dark:bg-neutral-900">
+      <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">Meetings</h2>
+      <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+        Last {meetings.length} meeting{meetings.length === 1 ? '' : 's'}, most recent first — tap a row for the roll
+      </p>
+
+      {meetings.length === 0 ? (
+        <p className="mt-4 text-sm text-neutral-400 dark:text-neutral-500">No meetings recorded yet.</p>
+      ) : (
+        <div className="mt-4 flex flex-col gap-2.5">
+          {meetings.map((m) => (
+            <MeetingRow
+              key={m.id}
+              meeting={m}
+              isToday={m.meetingDate === todayDate}
+              expanded={expandedIds.has(m.id)}
+              onToggle={() => toggle(m.id)}
+            />
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MeetingRow({
+  meeting, isToday, expanded, onToggle,
+}: {
+  meeting: AdminMeeting;
+  isToday: boolean;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const members = useMemo(() => meeting.attendees.filter((a) => a.kind === 'member'), [meeting.attendees]);
+  const leadership = useMemo(() => meeting.attendees.filter((a) => a.kind === 'leadership'), [meeting.attendees]);
+  const visitors = useMemo(() => meeting.attendees.filter((a) => a.kind === 'visitor'), [meeting.attendees]);
+
+  return (
+    <div className="rounded-xl border border-neutral-100 bg-white dark:border-neutral-800 dark:bg-neutral-900">
+      <button
+        type="button"
+        onClick={onToggle}
+        aria-expanded={expanded}
+        className="flex min-h-[52px] w-full items-center justify-between gap-3 px-4 py-3 text-left transition active:scale-[0.99]"
+      >
+        <span className="flex items-center gap-2.5">
+          <ChevronIcon expanded={expanded} />
+          <span className="font-medium text-neutral-900 dark:text-neutral-50">
+            {isToday ? 'Today' : formatMeetingDate(meeting.meetingDate)}
+          </span>
+        </span>
+        <span className="flex items-center gap-2">
+          <span className="text-sm text-neutral-600 dark:text-neutral-300">{meeting.total} attended</span>
+          {meeting.visitorCount > 0 ? (
+            <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-300">
+              {meeting.visitorCount} visitor{meeting.visitorCount === 1 ? '' : 's'}
+            </span>
+          ) : (
+            <span className="inline-flex items-center rounded-full bg-neutral-100 px-2.5 py-1 text-xs font-medium text-neutral-500 dark:bg-neutral-800 dark:text-neutral-400">
+              no visitors
+            </span>
+          )}
+        </span>
+      </button>
+
+      {expanded && (
+        <div className="flex flex-col gap-1.5 border-t border-neutral-100 px-4 py-3 text-sm text-neutral-600 dark:border-neutral-800 dark:text-neutral-300">
+          {members.length === 0 && leadership.length === 0 && visitors.length === 0 && (
+            <p className="text-neutral-400 dark:text-neutral-500">No attendance recorded.</p>
+          )}
+          {members.length > 0 && (
+            <p>
+              <span className="font-medium text-neutral-500 dark:text-neutral-400">Members: </span>
+              {members.map((a) => a.fullName).join(', ')}
+            </p>
+          )}
+          {leadership.length > 0 && (
+            <p>
+              <span className="font-medium text-neutral-500 dark:text-neutral-400">Leadership: </span>
+              {leadership.map((a) => a.fullName).join(', ')}
+            </p>
+          )}
+          {visitors.length > 0 && (
+            <p>
+              <span className="font-medium text-neutral-500 dark:text-neutral-400">Visitors: </span>
+              {visitors
+                .map((a) => (a.visitNumber != null ? `${a.fullName} (${ordinal(a.visitNumber)} visit)` : a.fullName))
+                .join(', ')}
+            </p>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 

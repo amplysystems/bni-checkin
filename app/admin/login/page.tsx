@@ -129,7 +129,19 @@ export default async function LoginPage({
       >
         <Image src="/bni-logo-transparent.png" alt="BNI" width={160} height={90} className="h-12 w-auto" />
 
-        <p className="font-display text-4xl font-extrabold leading-tight tracking-tight text-neutral-50 lg:text-5xl">
+        {/* text-2xl (not text-4xl) below lg: measured live at the md
+            breakpoint's narrowest point (768px viewport — a real iPad-
+            portrait width, and this rail is only 40% width there, md:w-2/5
+            above) — text-4xl wrapped "One plumber." mid-phrase into two
+            lines each ("One" / "plumber.", "One" / "lawyer.", "One of" /
+            "you."), since Unbounded is noticeably wider than the Archivo
+            this replaced (see app/layout.tsx). text-2xl keeps every line on
+            one line through the whole md range; lg:text-5xl (unchanged)
+            still fits comfortably once the rail widens to 50% at the lg
+            breakpoint. font-black (900), not font-extrabold (800) — only
+            700/900 are loaded for Unbounded, so 800 isn't an actual loaded
+            weight. */}
+        <p className="font-display text-2xl font-black leading-tight tracking-tight text-neutral-50 lg:text-5xl">
           One plumber.
           <br />
           One lawyer.

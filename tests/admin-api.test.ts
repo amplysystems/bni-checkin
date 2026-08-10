@@ -8,9 +8,11 @@ import { seed } from '../scripts/seed';
 import { setDb } from '@/lib/db';
 import { people, memberships, personRoles } from '@/db/schema';
 import { eq } from 'drizzle-orm';
-import { kioskRoster } from '@/lib/checkins';
+import { checkIn, kioskRoster, voidCheckIn } from '@/lib/checkins';
+import { chicagoDateString } from '@/lib/time';
 import { GET as attGET, POST as attPOST } from '@/app/api/admin/attendance/route';
 import { GET as rosterGET, POST as rosterPOST } from '@/app/api/admin/roster/route';
+import { GET as meetingsGET } from '@/app/api/admin/meetings/route';
 
 const mockAuth = vi.mocked(auth);
 
@@ -214,5 +216,79 @@ describe('admin API', () => {
     const gioRestored = restored.people.find((p: AdminPerson) => p.id === gio.id);
     expect(gioRestored).toBeTruthy();
     expect(gioRestored.deactivatedAt).toBeNull();
+  });
+
+  describe('meetings GET (option B "Meeting list")', () => {
+    it('rejects unauthenticated requests with 401', async () => {
+      asAnon();
+      expect((await meetingsGET()).status).toBe(401);
+    });
+
+    it('returns reverse-chron meetings with correct counts, excludes voided attendance, and reports visitor visit numbers', async () => {
+      asAdmin();
+      const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
+      const jason = roster.people.find((p: AdminPerson) => p.fullName === 'Jason Barrios');
+      const mike = roster.people.find((p: AdminPerson) => p.fullName === 'Mike Anderson');
+      const [visitor] = await db.insert(people).values({ fullName: 'Val Visitor' }).returning();
+
+      // Two distinct chapter-local afternoons a week apart — well clear of
+      // any midnight/DST boundary, so chicagoDateString resolves each to a
+      // single, distinct civil date.
+      const earlierDate = new Date(Date.UTC(2026, 6, 20, 18, 0, 0));
+      const laterDate = new Date(Date.UTC(2026, 6, 27, 18, 0, 0));
+      const earlierDateStr = chicagoDateString(earlierDate);
+      const laterDateStr = chicagoDateString(laterDate);
+
+      // Earlier meeting: Jason (member) checks in then gets voided — must
+      // not count or appear in attendees. The visitor checks in once (1st
+      // visit).
+      const jasonCheckin = await checkIn(db, {
+        personId: jason.id, clientOpId: 'op-jason-1', source: 'test', now: earlierDate,
+      });
+      await checkIn(db, {
+        personId: visitor.id, clientOpId: 'op-visitor-1', source: 'test', now: earlierDate,
+      });
+      await voidCheckIn(db, { attendanceId: jasonCheckin.attendance.id, by: 'test' });
+
+      // Later meeting: Mike (member) checks in; the same visitor checks in
+      // again (2nd visit — visitNumber counts prior active visitor
+      // attendance across all meetings, not just this one).
+      await checkIn(db, { personId: mike.id, clientOpId: 'op-mike-1', source: 'test', now: laterDate });
+      await checkIn(db, { personId: visitor.id, clientOpId: 'op-visitor-2', source: 'test', now: laterDate });
+
+      const res = await meetingsGET();
+      expect(res.status).toBe(200);
+      const body = await res.json();
+
+      const dates = body.meetings.map((m: { meetingDate: string }) => m.meetingDate);
+      const earlierIndex = dates.indexOf(earlierDateStr);
+      const laterIndex = dates.indexOf(laterDateStr);
+      expect(earlierIndex).toBeGreaterThan(-1);
+      expect(laterIndex).toBeGreaterThan(-1);
+      expect(laterIndex).toBeLessThan(earlierIndex); // reverse-chron: later date sorts first
+
+      type Attendee = { personId: string; fullName: string; kind: string; visitNumber: number | null };
+      type MeetingListItem = {
+        meetingDate: string; total: number; memberCount: number;
+        leadershipCount: number; visitorCount: number; attendees: Attendee[];
+      };
+
+      const earlierMeeting = body.meetings.find((m: MeetingListItem) => m.meetingDate === earlierDateStr);
+      expect(earlierMeeting.total).toBe(1); // Jason's voided row is excluded
+      expect(earlierMeeting.memberCount).toBe(0);
+      expect(earlierMeeting.visitorCount).toBe(1);
+      expect(earlierMeeting.attendees.find((a: Attendee) => a.fullName === 'Jason Barrios')).toBeUndefined();
+      const visitorAtEarlier = earlierMeeting.attendees.find((a: Attendee) => a.fullName === 'Val Visitor');
+      expect(visitorAtEarlier.kind).toBe('visitor');
+      expect(visitorAtEarlier.visitNumber).toBe(1);
+
+      const laterMeeting = body.meetings.find((m: MeetingListItem) => m.meetingDate === laterDateStr);
+      expect(laterMeeting.total).toBe(2);
+      expect(laterMeeting.memberCount).toBe(1);
+      expect(laterMeeting.visitorCount).toBe(1);
+      expect(laterMeeting.attendees.find((a: Attendee) => a.fullName === 'Mike Anderson')).toBeTruthy();
+      const visitorAtLater = laterMeeting.attendees.find((a: Attendee) => a.fullName === 'Val Visitor');
+      expect(visitorAtLater.visitNumber).toBe(2);
+    });
   });
 });

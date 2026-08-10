@@ -44,13 +44,34 @@ const BASE_CLASS =
 const SIZE_CLASS: Record<ButtonSize, string> = {
   // Kiosk primary CTAs ("First time here?", "Check in") — the biggest touch
   // target on the page; unchanged from their pre-Button min-height.
-  lg: 'rounded-2xl px-6 min-h-[64px] text-lg font-semibold',
+  lg: 'rounded-2xl px-6 min-h-[64px] text-lg',
   // Kiosk secondary touch actions ("Not you? Undo", "No — I'm new here") —
   // still a full touchscreen target, but not the page's primary CTA.
-  touch: 'rounded-2xl px-6 min-h-[56px] text-base font-medium',
+  touch: 'rounded-2xl px-6 min-h-[56px] text-base',
   // Admin dialog / roster panel / login — compact, mouse-oriented controls.
-  md: 'rounded-xl px-5 py-2.5 text-[15px] font-medium',
+  md: 'rounded-xl px-5 py-2.5 text-[15px]',
 };
+
+// Font weight is split out of SIZE_CLASS (rather than folded into it, the
+// way it used to be) because the primary variant needs a different
+// treatment — font-display font-bold, per the approved mockup showing the
+// red CTA in the display face — than secondary/ghost (font-sans, a
+// size-appropriate weight). Stacking two font-weight utilities on the same
+// element for primary buttons would hit exactly the "no reliable last-one-
+// wins from class order" problem this file's top docblock warns about, so
+// the two are composed as alternatives (see the component body below)
+// instead of ever appearing together in one class string.
+const SIZE_WEIGHT_CLASS: Record<ButtonSize, string> = {
+  lg: 'font-semibold',
+  touch: 'font-medium',
+  md: 'font-medium',
+};
+
+// Primary's text always goes through the display face at a fixed weight —
+// font-bold (700), one of the two Unbounded weights actually loaded (see
+// app/layout.tsx) — regardless of size, instead of SIZE_WEIGHT_CLASS's
+// per-size sans weight.
+const PRIMARY_TEXT_CLASS = 'font-display font-bold';
 
 const VARIANT_CLASS: Record<ButtonVariant, string> = {
   // #CF2030 as a literal arbitrary-value class (not built from a JS
@@ -91,6 +112,7 @@ export const Button = forwardRef<HTMLButtonElement, ButtonProps>(function Button
       className={cx(
         BASE_CLASS,
         SIZE_CLASS[size],
+        variant === 'primary' ? PRIMARY_TEXT_CLASS : SIZE_WEIGHT_CLASS[size],
         VARIANT_CLASS[variant],
         variant === 'ghost' && GHOST_TONE_CLASS[tone],
         fullWidth && 'w-full',
