@@ -50,14 +50,14 @@ describe('admin API', () => {
   it('rejects unauthenticated requests with 401', async () => {
     asAnon();
     expect((await attGET()).status).toBe(401);
-    expect((await rosterGET()).status).toBe(401);
+    expect((await rosterGET(new Request('http://admin.test/api/admin/roster'))).status).toBe(401);
     expect((await attPOST(post('/api/admin/attendance', {}))).status).toBe(401);
     expect((await rosterPOST(post('/api/admin/roster', {}))).status).toBe(401);
   });
 
   it('admin can add and void attendance, and the audit trail records who', async () => {
     asAdmin();
-    const roster = await (await rosterGET()).json();
+    const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     const jason = roster.people.find((p: AdminPerson) => p.fullName === 'Jason Barrios');
 
     const add = await (await attPOST(post('/api/admin/attendance', {
@@ -73,7 +73,7 @@ describe('admin API', () => {
 
   it('admin roster includes contact info (unlike kiosk) and edits persist', async () => {
     asAdmin();
-    const roster = await (await rosterGET()).json();
+    const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     expect(Object.keys(roster.people[0])).toEqual(
       expect.arrayContaining(['email', 'phone', 'industry', 'company']),
     );
@@ -82,13 +82,13 @@ describe('admin API', () => {
       action: 'update', personId: gio.id, fields: { fullName: 'Giovanni Rossi' },
     }));
     expect(res.status).toBe(200);
-    const after = await (await rosterGET()).json();
+    const after = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     expect(after.people.map((p: AdminPerson) => p.fullName)).toContain('Giovanni Rossi');
   });
 
   it('deactivate is a soft delete — person keeps existing in the table', async () => {
     asAdmin();
-    const roster = await (await rosterGET()).json();
+    const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     const gio = roster.people.find((p: AdminPerson) => p.fullName === 'Gio');
     await rosterPOST(post('/api/admin/roster', { action: 'deactivate', personId: gio.id }));
     const all = await db.select().from(people);
@@ -135,7 +135,7 @@ describe('admin API', () => {
 
   it('update with an empty fields object returns 400 instead of a silent no-op', async () => {
     asAdmin();
-    const roster = await (await rosterGET()).json();
+    const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     const jason = roster.people.find((p: AdminPerson) => p.fullName === 'Jason Barrios');
     const res = await rosterPOST(post('/api/admin/roster', {
       action: 'update', personId: jason.id, fields: {},
@@ -155,7 +155,7 @@ describe('admin API', () => {
 
   it('voiding an already-voided attendance row returns 404', async () => {
     asAdmin();
-    const roster = await (await rosterGET()).json();
+    const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     const jason = roster.people.find((p: AdminPerson) => p.fullName === 'Jason Barrios');
     const add = await (await attPOST(post('/api/admin/attendance', {
       action: 'add', personId: jason.id,
@@ -175,33 +175,33 @@ describe('admin API', () => {
   it('a session for an email no longer on the allowlist is treated as unauthenticated', async () => {
     vi.stubEnv('ADMIN_ALLOWLIST', 'barriosj4@gmail.com');
     asEmail('former@admin.com');
-    const res = await rosterGET();
+    const res = await rosterGET(new Request('http://admin.test/api/admin/roster'));
     expect(res.status).toBe(401);
   });
 
   it('reactivate clears deactivatedAt and the person reappears in roster GET', async () => {
     asAdmin();
-    const roster = await (await rosterGET()).json();
+    const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     const gio = roster.people.find((p: AdminPerson) => p.fullName === 'Gio');
     await rosterPOST(post('/api/admin/roster', { action: 'deactivate', personId: gio.id }));
-    const afterDeactivate = await (await rosterGET()).json();
+    const afterDeactivate = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     expect(afterDeactivate.people.map((p: AdminPerson) => p.id)).not.toContain(gio.id);
 
     const reactivateRes = await rosterPOST(post('/api/admin/roster', {
       action: 'reactivate', personId: gio.id,
     }));
     expect(reactivateRes.status).toBe(200);
-    const after = await (await rosterGET()).json();
+    const after = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     expect(after.people.map((p: AdminPerson) => p.id)).toContain(gio.id);
   });
 
   it('includeDeactivated=1 includes deactivated people; reactivate restores them to the default listing', async () => {
     asAdmin();
-    const roster = await (await rosterGET()).json();
+    const roster = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     const gio = roster.people.find((p: AdminPerson) => p.fullName === 'Gio');
     await rosterPOST(post('/api/admin/roster', { action: 'deactivate', personId: gio.id }));
 
-    const defaultListing = await (await rosterGET()).json();
+    const defaultListing = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     expect(defaultListing.people.map((p: AdminPerson) => p.id)).not.toContain(gio.id);
 
     const withDeactivated = await (await rosterGET(get('/api/admin/roster?includeDeactivated=1'))).json();
@@ -210,7 +210,7 @@ describe('admin API', () => {
     expect(gioIncluded.deactivatedAt).toBeTruthy();
 
     await rosterPOST(post('/api/admin/roster', { action: 'reactivate', personId: gio.id }));
-    const restored = await (await rosterGET()).json();
+    const restored = await (await rosterGET(new Request('http://admin.test/api/admin/roster'))).json();
     const gioRestored = restored.people.find((p: AdminPerson) => p.id === gio.id);
     expect(gioRestored).toBeTruthy();
     expect(gioRestored.deactivatedAt).toBeNull();

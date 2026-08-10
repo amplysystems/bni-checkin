@@ -7,11 +7,11 @@ import { requireAdmin } from '@/lib/admin-guard';
 // req is optional so every existing test call site that invokes GET() with
 // no arguments keeps working — only the new ?includeDeactivated=1 path needs
 // a real Request to read query params from. Next.js itself always passes one.
-export async function GET(req?: Request) {
+export async function GET(req: Request) {
   const guard = await requireAdmin();
   if (guard instanceof Response) return guard;
   const db = getDb();
-  const includeDeactivated = req ? new URL(req.url).searchParams.get('includeDeactivated') === '1' : false;
+  const includeDeactivated = new URL(req.url).searchParams.get('includeDeactivated') === '1';
   const rows = includeDeactivated
     ? await db.select().from(people)
     : await db.select().from(people).where(isNull(people.deactivatedAt));
