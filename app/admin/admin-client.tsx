@@ -78,7 +78,7 @@ type EmailMessageRow = {
   createdAt: string;
 };
 
-type EmailsResponse = { messages: EmailMessageRow[] };
+type EmailsResponse = { messages: EmailMessageRow[]; safeMode: boolean };
 
 type EmailSettings = {
   approveMode: boolean;
@@ -109,7 +109,7 @@ type DialogState = { mode: 'create' } | { mode: 'edit'; person: AdminPerson } | 
 type LoadResult =
   | {
       ok: true; people: AdminPerson[]; attendance: AttendanceRow[]; meetingDate: string; meetings: AdminMeeting[];
-      emailMessages: EmailMessageRow[]; emailSettings: EmailSettings;
+      emailMessages: EmailMessageRow[]; emailSettings: EmailSettings; emailSafeMode: boolean;
     }
   | { ok: false };
 
@@ -266,6 +266,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [meetings, setMeetings] = useState<AdminMeeting[] | null>(null);
   const [emailMessages, setEmailMessages] = useState<EmailMessageRow[] | null>(null);
   const [emailSettings, setEmailSettings] = useState<EmailSettings | null>(null);
+  const [emailSafeMode, setEmailSafeMode] = useState(false);
   const [loadError, setLoadError] = useState(false);
   const [showDeactivated, setShowDeactivated] = useState(false);
 
@@ -367,6 +368,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
         meetings: meetingsData.meetings,
         emailMessages: emailsData.messages,
         emailSettings: settingsData.settings,
+        emailSafeMode: emailsData.safeMode,
       };
     } catch {
       return { ok: false };
@@ -382,6 +384,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
       setMeetings(result.meetings);
       setEmailMessages(result.emailMessages);
       setEmailSettings(result.emailSettings);
+      setEmailSafeMode(result.emailSafeMode);
       setLoadError(false);
     } else {
       setLoadError(true);
@@ -856,6 +859,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
               <MeetingsPanel meetings={meetings} todayDate={meetingDate} />
               <EmailsSection
                 messages={emailMessages}
+                safeMode={emailSafeMode}
                 previewLoadingId={previewLoadingId}
                 approvingId={approvingId}
                 sendingId={sendingId}
@@ -1380,13 +1384,14 @@ function groupEmailMessages(messages: EmailMessageRow[]): MeetingEmailGroup[] {
 const SEND_NOW_STATES: EmailState[] = ['draft', 'awaiting_approval', 'scheduled', 'failed'];
 
 function EmailsSection({
-  messages, previewLoadingId, approvingId, sendingId, onPreview, onApprove, onSendNow,
+  messages, safeMode, previewLoadingId, approvingId, sendingId, onPreview, onApprove, onSendNow,
   compileDate, onCompileDateChange, compiling, onCompile,
   settingsForm, onToggleApproveMode, onSettingsFormChange,
   recipientInput, onRecipientInputChange, onAddRecipient, onRemoveRecipient, onToggleRosterRecipient,
   rosterWithEmail, savingSettings, settingsError, onSaveSettings,
 }: {
   messages: EmailMessageRow[];
+  safeMode: boolean;
   previewLoadingId: string | null;
   approvingId: string | null;
   sendingId: string | null;
@@ -1425,6 +1430,12 @@ function EmailsSection({
       <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
         Visitor thank-yous and the weekly leadership report &mdash; preview them, approve them, or send them yourself.
       </p>
+
+      {safeMode && (
+        <div className="mt-4 rounded-xl bg-amber-50 px-4 py-3 text-sm font-medium text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">
+          Test mode is on &mdash; every email is redirected to your inbox with a [SAFE&rarr;&hellip;] label. Nothing reaches real visitors.
+        </div>
+      )}
 
       {failedCount > 0 && (
         <div className={`mt-4 rounded-xl bg-red-50 px-4 py-3 text-sm font-medium dark:bg-red-950/40 ${RED_TEXT_CLASS}`}>

@@ -7,7 +7,7 @@ import { auth } from '@/auth';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seed } from '../scripts/seed';
 import { setDb } from '@/lib/db';
-import { emailMessages, settings } from '@/db/schema';
+import { emailMessages, meetings, settings } from '@/db/schema';
 import { getOrCreateMeetingFor } from '@/lib/meetings';
 import { registerVisitor } from '@/lib/visitors';
 import { createDrafts } from '@/lib/emails/engine';
@@ -99,6 +99,16 @@ describe('admin emails API (app/api/admin/emails)', () => {
       expect(exportRow.label).toBe('Weekly export');
       expect(exportRow.state).toBe('sent');
       expect(exportRow.meetingId).toBeNull();
+    });
+
+    it('reflects SAFE_MODE from the environment (review carry-in)', async () => {
+      vi.stubEnv('EMAIL_SAFE_MODE', undefined); // default ON
+      const onBody = (await (await emailsGET()).json()) as { safeMode: boolean };
+      expect(onBody.safeMode).toBe(true);
+
+      vi.stubEnv('EMAIL_SAFE_MODE', '0'); // EMAIL_FROM already stubbed to a real sender in beforeEach
+      const offBody = (await (await emailsGET()).json()) as { safeMode: boolean };
+      expect(offBody.safeMode).toBe(false);
     });
   });
 
@@ -216,6 +226,40 @@ describe('admin emails API (app/api/admin/emails)', () => {
     it('404s when no meeting exists on that date', async () => {
       const res = await emailsPOST(post('/api/admin/emails', { action: 'compile', meetingDate: '2099-01-07' }));
       expect(res.status).toBe(404);
+    });
+
+    // CRITICAL review carry-in: createDrafts is create-only (ON CONFLICT DO
+    // NOTHING on send_key), so a premature compile against a
+    // zero-attendance meeting would permanently claim that meeting's
+    // send_key rows — the real evening compile, once people actually check
+    // in, would then silently skip everything. Same two gates as
+    // lib/emails/tick.ts's cron sweep, enforced here with no override.
+    it('400s and creates NO drafts for a meeting with zero attendance', async () => {
+      const [emptyMeeting] = await db.insert(meetings).values({
+        meetingDate: '2026-08-19', startsAt: new Date('2026-08-19T20:30:00Z'),
+      }).returning();
+
+      const res = await emailsPOST(post('/api/admin/emails', { action: 'compile', meetingDate: '2026-08-19' }));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe('That meeting has no check-ins yet — emails get ready on their own once people check in.');
+
+      const rows = await db.select().from(emailMessages).where(eq(emailMessages.meetingId, emptyMeeting.id));
+      expect(rows).toHaveLength(0); // send_key never claimed — the real compile later isn't blocked
+    });
+
+    it('400s for a canceled meeting', async () => {
+      const [canceled] = await db.insert(meetings).values({
+        meetingDate: '2026-08-26', startsAt: new Date('2026-08-26T20:30:00Z'), status: 'canceled',
+      }).returning();
+
+      const res = await emailsPOST(post('/api/admin/emails', { action: 'compile', meetingDate: '2026-08-26' }));
+      expect(res.status).toBe(400);
+      const body = await res.json();
+      expect(body.error).toBe('That meeting was canceled.');
+
+      const rows = await db.select().from(emailMessages).where(eq(emailMessages.meetingId, canceled.id));
+      expect(rows).toHaveLength(0);
     });
 
     it('compiles drafts for a real meeting date with attendance', async () => {

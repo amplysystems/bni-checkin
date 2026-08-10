@@ -41,7 +41,32 @@
 // can be large (the full compiled HTML per message) and isn't needed for
 // the disaster-recovery scenarios in scope (rebuilding roster/attendance/
 // send-state, not replaying old outbound mail content).
+//
+// IDEMPOTENCY (review carry-in, closing a spec §8 gap): runWeeklyExport now
+// follows the same "claim BEFORE doing the work" discipline as lib/emails/
+// engine.ts's createDrafts/claimAndSend — an INSERT ... ON CONFLICT DO
+// NOTHING on the per-Chicago-day send_key (weeklyExportSendKey) is the
+// FIRST thing this function does, before dumpTables() or any network call.
+// A duplicated trigger for the same day (an overlapping Netlify Scheduled
+// Function retry, or an operator re-running the cron route by hand) finds
+// the row already claimed and returns { skipped: true } without touching
+// the database further or sending anything a second time.
+//
+// The claimed row starts in 'sending' (not 'draft' — there's no meaningful
+// approval step for this type) with sendingAt stamped, which is also a
+// free crash-recovery win: if the process dies between the claim and the
+// UPDATE to sent/failed below, the SAME reapStaleSending sweep (lib/emails/
+// engine.ts, run every email-cron tick) that already recovers every other
+// email type stuck mid-send picks this one up too, no special-casing
+// needed there. A failed send updates the row to 'failed' + error (and
+// rethrows, so the cron invocation still surfaces as an error for
+// monitoring) rather than leaving it stuck — from there it's retryable
+// like any other failed row via the admin email center's Send now/Retry,
+// though a retry through the generic engine path resends the HTML/subject
+// only, without reconstructing the JSON attachment (attachments were never
+// persisted anywhere — see toSendable in lib/emails/engine.ts).
 
+import { eq } from 'drizzle-orm';
 import {
   attendance, emailMessages, meetings, memberships, people, personRoles, settings as settingsTable,
 } from '@/db/schema';
@@ -115,12 +140,35 @@ function exportText(dateStr: string, counts: Record<string, number>): string {
 }
 
 export type WeeklyExportResult = {
-  tableCounts: Record<string, number>;
-  providerMessageId: string;
+  skipped: boolean;
+  tableCounts: Record<string, number> | null;
+  providerMessageId: string | null;
 };
 
 export async function runWeeklyExport(db: Db, now: Date = new Date()): Promise<WeeklyExportResult> {
   const dateStr = chicagoDateString(now);
+  const sendKey = weeklyExportSendKey(dateStr);
+  const subject = exportSubject(dateStr);
+
+  // Claim FIRST, before any query heavier than this single insert and
+  // before any network call — see the module header for why. Recipients
+  // and subject are cheap to compute up front (no DB dependency); the
+  // dump/html/attachment are only built once this call knows it actually
+  // won the claim.
+  const [claimed] = await db.insert(emailMessages).values({
+    sendKey,
+    type: 'weekly_export',
+    meetingId: null,
+    recipients: [OWNER_EMAIL],
+    subject,
+    state: 'sending',
+    sendingAt: now,
+  }).onConflictDoNothing({ target: emailMessages.sendKey }).returning();
+
+  if (!claimed) {
+    return { skipped: true, tableCounts: null, providerMessageId: null };
+  }
+
   const tables = await dumpTables(db);
   const tableCounts = Object.fromEntries(
     Object.entries(tables).map(([name, rows]) => [name, rows.length]),
@@ -131,41 +179,32 @@ export async function runWeeklyExport(db: Db, now: Date = new Date()): Promise<W
     filename: `bni-checkin-export-${dateStr}.json`,
     content: Buffer.from(json, 'utf-8').toString('base64'),
   };
-
-  const subject = exportSubject(dateStr);
   const html = exportHtml(dateStr, tableCounts);
 
-  const result = await sendEmailMessage({
-    type: 'weekly_export',
-    sendKey: weeklyExportSendKey(dateStr),
-    recipients: [OWNER_EMAIL],
-    subject,
-    html,
-    text: exportText(dateStr, tableCounts),
-    attachments: [attachment],
-  }, now);
+  try {
+    const result = await sendEmailMessage({
+      type: 'weekly_export',
+      sendKey,
+      recipients: [OWNER_EMAIL],
+      subject,
+      html,
+      text: exportText(dateStr, tableCounts),
+      attachments: [attachment],
+    }, now);
 
-  // Task 5 carry-in ("latest weekly export linked"): record this send as a
-  // real email_messages row so the admin email center has something to
-  // read. Written AFTER the send succeeds (never a pre-send 'draft' row —
-  // this type never enters lib/emails/engine.ts's state machine at all),
-  // and only after dumpTables() already ran above, so this week's own row
-  // is never included in the JSON attachment it's documenting.
-  // onConflictDoNothing on the per-day send_key: a duplicated cron trigger
-  // still sends twice (an accepted pre-existing gap — see this module's
-  // header), but only ever leaves one row behind for the day, so "latest
-  // export" reads never see a spurious duplicate.
-  await db.insert(emailMessages).values({
-    sendKey: weeklyExportSendKey(dateStr),
-    type: 'weekly_export',
-    meetingId: null,
-    recipients: [OWNER_EMAIL],
-    subject,
-    bodySnapshot: html,
-    state: 'sent',
-    sentAt: now,
-    providerMessageId: result.providerMessageId,
-  }).onConflictDoNothing({ target: emailMessages.sendKey });
+    await db.update(emailMessages)
+      .set({
+        state: 'sent', sentAt: new Date(), providerMessageId: result.providerMessageId,
+        bodySnapshot: html, error: null,
+      })
+      .where(eq(emailMessages.id, claimed.id));
 
-  return { tableCounts, providerMessageId: result.providerMessageId };
+    return { skipped: false, tableCounts, providerMessageId: result.providerMessageId };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    await db.update(emailMessages)
+      .set({ state: 'failed', error: message, bodySnapshot: html })
+      .where(eq(emailMessages.id, claimed.id));
+    throw err;
+  }
 }

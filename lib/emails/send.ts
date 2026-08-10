@@ -59,12 +59,17 @@ function fromIsUnverifiedFallback(): boolean {
   return from.includes(RESEND_DEV_FALLBACK);
 }
 
-export function isSafeModeOn(): boolean {
+// Exported (not just an internal helper of applySafeMode below) so
+// app/api/admin/emails' GET can report `safeMode` to the admin UI — the
+// email center shows a banner ("Test mode is on…") whenever this is true,
+// since otherwise an admin watching "Sent" chips has no way to tell a real
+// send from one that got silently redirected to the owner's own inbox.
+export function isSafeModeActive(): boolean {
   return envSaysSafeMode() || fromIsUnverifiedFallback();
 }
 
 function applySafeMode(message: SendableMessage): SendableMessage {
-  if (!isSafeModeOn()) return message;
+  if (!isSafeModeActive()) return message;
   const original = message.recipients.join(', ');
   return {
     ...message,

@@ -16,11 +16,12 @@ import { desc, eq, inArray } from 'drizzle-orm';
 import { getDb } from '@/lib/db';
 import { emailMessages, meetings, people, type EmailMessage } from '@/db/schema';
 import { requireAdmin } from '@/lib/admin-guard';
-import { findMeetingByDate } from '@/lib/meetings';
+import { findMeetingByDate, meetingHasAttendance } from '@/lib/meetings';
 import {
   approve, createDrafts, EngineError, getSettings, scheduledTimeFor, sendNow,
 } from '@/lib/emails/engine';
 import { compileForMeeting, CompileError } from '@/lib/emails/compile';
+import { isSafeModeActive } from '@/lib/emails/send';
 
 // "Last 8 meetings' worth" per the plan — a smaller window than the
 // Meetings panel's own 26 (app/api/admin/meetings/route.ts): email history
@@ -119,7 +120,11 @@ export async function GET() {
     };
   });
 
-  return Response.json({ messages: out });
+  // Surfaced so the admin UI can show a "test mode is on" banner — without
+  // this, a run of 'Sent' chips looks identical whether real visitors got
+  // the email or every one of them got silently redirected to the owner's
+  // own inbox with a [SAFE→…] subject prefix (lib/emails/send.ts).
+  return Response.json({ messages: out, safeMode: isSafeModeActive() });
 }
 
 const Body = z.discriminatedUnion('action', [
@@ -145,9 +150,29 @@ export async function POST(req: Request) {
   // actually falls on this date — the cron only ever compiles TODAY's
   // meeting, so this is the only path a non-Wednesday special meeting's
   // drafts ever get built through.
+  //
+  // CRITICAL (review carry-in): gated with the EXACT same two checks
+  // lib/emails/tick.ts's cron sweep applies before it will ever call
+  // createDrafts for today's meeting — status !== 'canceled' AND
+  // meetingHasAttendance. This is required, not a nicety: createDrafts is
+  // create-only (ON CONFLICT DO NOTHING on send_key — see its own header
+  // comment), so a premature compile against a canceled or zero-attendance
+  // meeting would PERMANENTLY claim that meeting's send_key rows. The real
+  // compile later that evening, once people have actually checked in,
+  // would then find every send_key already "taken" and silently skip —
+  // no drafts, no error, no visible sign anything went wrong until Jason
+  // notices no emails ever arrived.
   if (d.action === 'compile') {
     const meeting = await findMeetingByDate(db, d.meetingDate);
     if (!meeting) return Response.json({ error: 'meeting_not_found' }, { status: 404 });
+    if (meeting.status === 'canceled') {
+      return Response.json({ error: 'That meeting was canceled.' }, { status: 400 });
+    }
+    if (!(await meetingHasAttendance(db, meeting.id))) {
+      return Response.json({
+        error: 'That meeting has no check-ins yet — emails get ready on their own once people check in.',
+      }, { status: 400 });
+    }
     const { created, skipped } = await createDrafts(db, meeting.id);
     return Response.json({ meetingId: meeting.id, created: created.length, skipped });
   }

@@ -1,8 +1,11 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
+import { eq } from 'drizzle-orm';
 import { emailMessages } from '@/db/schema';
 import { setDb } from '@/lib/db';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seed } from '../scripts/seed';
+import { chicagoDateString } from '@/lib/time';
+import { weeklyExportSendKey } from '@/lib/emails/send-keys';
 import { runWeeklyExport } from '@/lib/emails/export';
 import { POST as exportPOST } from '@/app/api/cron/weekly-export/route';
 
@@ -11,6 +14,10 @@ const SUNDAY = new Date('2026-08-16T08:00:00Z'); // 03:00 CT Sunday — the cron
 function mockFetchOk(id = 'resend-export-1') {
   return vi.fn().mockResolvedValue({ ok: true, json: async () => ({ id }), text: async () => '' });
 }
+function mockFetchFail(status = 500, body = 'boom') {
+  return vi.fn().mockResolvedValue({ ok: false, status, text: async () => body });
+}
+const SUNDAY_SEND_KEY = weeklyExportSendKey(chicagoDateString(SUNDAY));
 
 describe('lib/emails/export: runWeeklyExport', () => {
   let db: TestDb;
@@ -85,9 +92,44 @@ describe('lib/emails/export: runWeeklyExport', () => {
   it('returns per-table row counts matching the attached dump', async () => {
     vi.stubGlobal('fetch', mockFetchOk());
     const result = await runWeeklyExport(db, SUNDAY);
-    expect(result.tableCounts.people).toBeGreaterThan(0);
-    expect(typeof result.tableCounts.meetings).toBe('number');
-    expect(typeof result.tableCounts.settings).toBe('number');
+    expect(result.skipped).toBe(false);
+    expect(result.tableCounts?.people).toBeGreaterThan(0);
+    expect(typeof result.tableCounts?.meetings).toBe('number');
+    expect(typeof result.tableCounts?.settings).toBe('number');
+  });
+
+  describe('idempotency (review carry-in, spec §8)', () => {
+    it('claims the send_key FIRST — a second call the same Chicago day is skipped, sending exactly once', async () => {
+      const fetchMock = mockFetchOk();
+      vi.stubGlobal('fetch', fetchMock);
+
+      const first = await runWeeklyExport(db, SUNDAY);
+      expect(first.skipped).toBe(false);
+      expect(first.providerMessageId).toBe('resend-export-1');
+      expect(fetchMock).toHaveBeenCalledTimes(1);
+
+      const second = await runWeeklyExport(db, SUNDAY);
+      expect(second).toEqual({ skipped: true, tableCounts: null, providerMessageId: null });
+      expect(fetchMock).toHaveBeenCalledTimes(1); // no extra network call on the skipped run
+
+      const rows = await db.select().from(emailMessages).where(eq(emailMessages.sendKey, SUNDAY_SEND_KEY));
+      expect(rows).toHaveLength(1); // exactly one tracking row, never duplicated
+      expect(rows[0].state).toBe('sent');
+      expect(rows[0].providerMessageId).toBe('resend-export-1');
+    });
+
+    it('marks the row failed (with the error) and rethrows when the Resend send fails — retryable via the email center afterward', async () => {
+      vi.stubGlobal('fetch', mockFetchFail(500, 'resend outage'));
+
+      const err = await runWeeklyExport(db, SUNDAY).catch((e) => e);
+      expect(err).toBeInstanceOf(Error);
+
+      const [row] = await db.select().from(emailMessages).where(eq(emailMessages.sendKey, SUNDAY_SEND_KEY));
+      expect(row).toBeTruthy();
+      expect(row.state).toBe('failed');
+      expect(row.error).toBeTruthy();
+      expect(row.sentAt).toBeNull();
+    });
   });
 });
 

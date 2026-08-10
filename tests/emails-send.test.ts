@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { sendEmailMessage, isSafeModeOn, type SendableMessage } from '@/lib/emails/send';
+import { sendEmailMessage, isSafeModeActive, type SendableMessage } from '@/lib/emails/send';
 
 const OWNER = 'barriosj4@gmail.com';
 
@@ -36,26 +36,26 @@ describe('lib/emails/send', () => {
 
   it('EMAIL_SAFE_MODE unset defaults to ON (fails safe, never open)', () => {
     vi.stubEnv('EMAIL_SAFE_MODE', undefined);
-    expect(isSafeModeOn()).toBe(true);
+    expect(isSafeModeActive()).toBe(true);
   });
 
   it('EMAIL_SAFE_MODE="0" with a verified EMAIL_FROM turns safe mode OFF', () => {
-    expect(isSafeModeOn()).toBe(false);
+    expect(isSafeModeActive()).toBe(false);
   });
 
   it('any non-"0" value counts as ON (fails safe on typos)', () => {
     vi.stubEnv('EMAIL_SAFE_MODE', 'off');
-    expect(isSafeModeOn()).toBe(true);
+    expect(isSafeModeActive()).toBe(true);
   });
 
   it('forces safe mode ON when EMAIL_FROM is the resend.dev fallback, even with EMAIL_SAFE_MODE=0', () => {
     vi.stubEnv('EMAIL_FROM', 'onboarding@resend.dev');
-    expect(isSafeModeOn()).toBe(true);
+    expect(isSafeModeActive()).toBe(true);
   });
 
   it('forces safe mode ON when EMAIL_FROM is unset (implicit fallback)', () => {
     vi.stubEnv('EMAIL_FROM', undefined);
-    expect(isSafeModeOn()).toBe(true);
+    expect(isSafeModeActive()).toBe(true);
   });
 
   it('safe mode OFF: sends to the real recipient with the unmodified subject', async () => {
