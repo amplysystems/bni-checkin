@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seed } from '../scripts/seed';
 import { setDb } from '@/lib/db';
@@ -36,6 +36,14 @@ describe('kiosk API', () => {
         .where(eq(people.id, p.id));
     }
     setDb(db);
+  });
+
+  // Guards every test below against fake-timer leakage: any rate-limit test
+  // that engages vi.useFakeTimers() but throws before its own cleanup would
+  // otherwise leave subsequent tests running on a frozen clock. A no-op when
+  // real timers are already active.
+  afterEach(() => {
+    vi.useRealTimers();
   });
 
   it('roster returns members with fields but NEVER contact info', async () => {
@@ -252,7 +260,20 @@ describe('kiosk API', () => {
   // fresh PGlite db each beforeEach creates. The limiter runs before body
   // validation in every route, so a structurally-valid-but-nonexistent id
   // is enough to exercise it without needing extra seeded rows.
+  //
+  // Every loop below freezes Date via vi.useFakeTimers({ toFake: ['Date'] })
+  // — routes call `new Date()` directly (no injectable `now`, unlike
+  // checkIn/voidCheckIn), and the limiter's window is a real wall-clock hour
+  // bucket. Without freezing, 40+ sequential calls that happen to straddle
+  // an hour boundary mid-loop roll into a fresh window and the "blocked"
+  // assertion flakes — the exact "fixed-window boundary-burst" residual
+  // documented in lib/rate-limit.ts, just showing up as test flakiness
+  // instead of a live kiosk hiccup. Only Date is faked (not timers), so
+  // PGlite/drizzle's own async machinery is untouched.
+  const FROZEN_NOW = new Date('2026-08-12T20:00:00.000Z');
+
   it('checkin route enforces the 40/hour per-IP limit and 429s with {error:"rate_limited"}', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: FROZEN_NOW });
     const unknownPersonId = '00000000-0000-0000-0000-000000000000';
     let last;
     for (let i = 0; i < 40; i++) {
@@ -270,6 +291,7 @@ describe('kiosk API', () => {
   });
 
   it('undo route enforces the 40/hour per-IP limit and 429s with {error:"rate_limited"}', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: FROZEN_NOW });
     const unknownAttendanceId = '00000000-0000-0000-0000-000000000000';
     let last;
     for (let i = 0; i < 40; i++) {
@@ -282,19 +304,37 @@ describe('kiosk API', () => {
     expect(await blocked.json()).toEqual({ error: 'rate_limited' });
   });
 
-  it('visitor route enforces the 5/hour per-IP limit and 429s with {error:"rate_limited"}', async () => {
+  it('visitor route enforces the 25/hour per-IP limit and 429s with {error:"rate_limited"}', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: FROZEN_NOW });
     let last;
-    for (let i = 0; i < 5; i++) {
+    for (let i = 0; i < 25; i++) {
       last = await visitorPOST(post('/api/kiosk/visitor', { fullName: '' }));
     }
-    expect(last!.status).toBe(400); // 5th request still under budget (fails validation, not the limiter)
+    expect(last!.status).toBe(400); // 25th request still under budget (fails validation, not the limiter)
 
     const blocked = await visitorPOST(post('/api/kiosk/visitor', { fullName: '' }));
     expect(blocked.status).toBe(429);
     expect(await blocked.json()).toEqual({ error: 'rate_limited' });
   });
 
+  // confirmedNew:true is NOT exempted from the count (see KIOSK_RATE_LIMITS'
+  // comment in lib/rate-limit.ts) — an attacker would just always set it, so
+  // every POST charges the budget regardless of its value.
+  it('visitor route charges the limit even when confirmedNew:true is set', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: FROZEN_NOW });
+    let last;
+    for (let i = 0; i < 25; i++) {
+      last = await visitorPOST(post('/api/kiosk/visitor', { fullName: '', confirmedNew: true }));
+    }
+    expect(last!.status).toBe(400);
+
+    const blocked = await visitorPOST(post('/api/kiosk/visitor', { fullName: '', confirmedNew: true }));
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toEqual({ error: 'rate_limited' });
+  });
+
   it('rate limits are isolated per IP: a second IP is unaffected by the first maxing out', async () => {
+    vi.useFakeTimers({ toFake: ['Date'], now: FROZEN_NOW });
     const unknownAttendanceId = '00000000-0000-0000-0000-000000000000';
     function postFrom(ip: string) {
       return new Request('http://kiosk.test/api/kiosk/undo', {

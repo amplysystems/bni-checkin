@@ -204,6 +204,7 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
   const [chipPendingId, setChipPendingId] = useState<string | null>(null);
   const [deactivatingId, setDeactivatingId] = useState<string | null>(null);
   const [reactivatingId, setReactivatingId] = useState<string | null>(null);
+  const [resettingRateLimits, setResettingRateLimits] = useState(false);
 
   const [dialog, setDialog] = useState<DialogState>(null);
   const [form, setForm] = useState<PersonFormState>(emptyForm);
@@ -329,6 +330,30 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
     showToast(existing ? 'Removed from today' : 'Checked in');
     loadAll();
   }, [chipPendingId, attendanceByPerson, showToast, loadAll]);
+
+  // ---- Today panel: break-glass kiosk rate-limit reset ----
+  // See lib/rate-limit.ts's KIOSK_RATE_LIMITS comment for why these budgets
+  // can plausibly trip during a real Wednesday (one shared venue IP for all
+  // kiosk traffic) — this is the only recovery path short of waiting out
+  // the hour-long window.
+
+  const handleResetRateLimits = useCallback(async () => {
+    if (resettingRateLimits) return;
+    const confirmed = window.confirm(
+      "If the kiosk says \"too many tries,\" this unlocks it right away. Reset kiosk limits now?",
+    );
+    if (!confirmed) return;
+    setResettingRateLimits(true);
+    const result = await postJson<{ reset: boolean; cleared: number }>('/api/admin/rate-limits', {
+      action: 'reset',
+    });
+    setResettingRateLimits(false);
+    if (!result.ok) {
+      showToast(GENERIC_ERROR);
+      return;
+    }
+    showToast('Kiosk limits reset');
+  }, [resettingRateLimits, showToast]);
 
   // ---- Roster panel: create / edit / deactivate / reactivate ----
 
@@ -491,6 +516,8 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
                 attendanceByPerson={attendanceByPerson}
                 pendingId={chipPendingId}
                 onToggle={toggleAttendance}
+                onResetRateLimits={handleResetRateLimits}
+                resettingRateLimits={resettingRateLimits}
               />
               <RosterPanel
                 people={people}
@@ -540,12 +567,14 @@ export default function AdminClient({ adminEmail }: { adminEmail: string }) {
 // ---- Today panel ----------------------------------------------------------
 
 function TodayPanel({
-  people, attendanceByPerson, pendingId, onToggle,
+  people, attendanceByPerson, pendingId, onToggle, onResetRateLimits, resettingRateLimits,
 }: {
   people: AdminPerson[];
   attendanceByPerson: Map<string, AttendanceRow>;
   pendingId: string | null;
   onToggle: (personId: string) => void;
+  onResetRateLimits: () => void;
+  resettingRateLimits: boolean;
 }) {
   const sorted = useMemo(
     () => [...people].sort((a, b) => a.fullName.localeCompare(b.fullName)),
@@ -554,12 +583,22 @@ function TodayPanel({
 
   return (
     <section className="mt-6 rounded-2xl bg-white p-6 shadow-sm dark:bg-neutral-900">
-      <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">
-        Today · {attendanceByPerson.size} checked in
-      </h2>
-      <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
-        Tap a person to add or void today&apos;s attendance
-      </p>
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-lg font-semibold text-neutral-900 dark:text-neutral-50">
+            Today · {attendanceByPerson.size} checked in
+          </h2>
+          <p className="mt-1 text-sm text-neutral-500 dark:text-neutral-400">
+            Tap a person to add or void today&apos;s attendance
+          </p>
+        </div>
+        {/* Quiet by design — this is a break-glass control for a rare kiosk
+            hiccup, not a routine action, so it shouldn't compete visually
+            with the panel's normal check-in taps. */}
+        <Button variant="ghost" tone="neutral" size="md" onClick={onResetRateLimits} disabled={resettingRateLimits}>
+          {resettingRateLimits ? 'Resetting…' : 'Reset kiosk limits'}
+        </Button>
+      </div>
 
       {sorted.length === 0 ? (
         <p className="mt-4 text-sm text-neutral-400 dark:text-neutral-500">No one on the roster yet.</p>

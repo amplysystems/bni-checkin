@@ -6,13 +6,15 @@ import { auth } from '@/auth';
 import { createTestDb, type TestDb } from './helpers/db';
 import { seed } from '../scripts/seed';
 import { setDb } from '@/lib/db';
-import { people, memberships, personRoles } from '@/db/schema';
+import { people, memberships, personRoles, rateLimits } from '@/db/schema';
 import { eq } from 'drizzle-orm';
 import { checkIn, kioskRoster, voidCheckIn } from '@/lib/checkins';
 import { chicagoDateString } from '@/lib/time';
+import { checkRateLimit } from '@/lib/rate-limit';
 import { GET as attGET, POST as attPOST } from '@/app/api/admin/attendance/route';
 import { GET as rosterGET, POST as rosterPOST } from '@/app/api/admin/roster/route';
 import { GET as meetingsGET } from '@/app/api/admin/meetings/route';
+import { POST as rateLimitsPOST } from '@/app/api/admin/rate-limits/route';
 
 const mockAuth = vi.mocked(auth);
 
@@ -289,6 +291,39 @@ describe('admin API', () => {
       expect(laterMeeting.attendees.find((a: Attendee) => a.fullName === 'Mike Anderson')).toBeTruthy();
       const visitorAtLater = laterMeeting.attendees.find((a: Attendee) => a.fullName === 'Val Visitor');
       expect(visitorAtLater.visitNumber).toBe(2);
+    });
+  });
+
+  describe('rate-limits reset (break-glass, Task 1 security follow-up)', () => {
+    it('rejects unauthenticated requests with 401', async () => {
+      asAnon();
+      const res = await rateLimitsPOST(post('/api/admin/rate-limits', { action: 'reset' }));
+      expect(res.status).toBe(401);
+    });
+
+    it('rejects a malformed body with 400', async () => {
+      asAdmin();
+      const res = await rateLimitsPOST(post('/api/admin/rate-limits', { action: 'nope' }));
+      expect(res.status).toBe(400);
+    });
+
+    it('clears seeded rate_limits rows so a previously-blocked caller is allowed again', async () => {
+      asAdmin();
+      const now = new Date('2026-08-12T20:00:00Z');
+      const opts = { ip: '9.9.9.9', route: 'visitor', limit: 1, windowMinutes: 60, now };
+      expect((await checkRateLimit(db, opts)).allowed).toBe(true);
+      expect((await checkRateLimit(db, opts)).allowed).toBe(false); // tripped
+
+      const res = await rateLimitsPOST(post('/api/admin/rate-limits', { action: 'reset' }));
+      expect(res.status).toBe(200);
+      const body = await res.json();
+      expect(body.reset).toBe(true);
+      expect(body.cleared).toBeGreaterThan(0);
+
+      const remaining = await db.select().from(rateLimits);
+      expect(remaining.length).toBe(0);
+
+      expect((await checkRateLimit(db, opts)).allowed).toBe(true); // unlocked
     });
   });
 });

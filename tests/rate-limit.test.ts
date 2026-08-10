@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
 import { createTestDb } from './helpers/db';
 import { checkRateLimit, cleanupExpiredRateLimits, getClientIp } from '@/lib/rate-limit';
 import { rateLimits } from '@/db/schema';
@@ -78,6 +78,11 @@ describe('cleanupExpiredRateLimits', () => {
 });
 
 describe('getClientIp', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
   it('prefers x-nf-client-connection-ip over x-forwarded-for', () => {
     const req = new Request('http://kiosk.test/api/kiosk/checkin', {
       headers: { 'x-nf-client-connection-ip': '10.0.0.1', 'x-forwarded-for': '10.0.0.2, 10.0.0.3' },
@@ -95,5 +100,62 @@ describe('getClientIp', () => {
   it('falls back to "unknown" when neither header is present', () => {
     const req = new Request('http://kiosk.test/api/kiosk/checkin');
     expect(getClientIp(req)).toBe('unknown');
+  });
+
+  it('rejects an x-forwarded-for hop containing whitespace and falls back to "unknown"', () => {
+    const req = new Request('http://kiosk.test/api/kiosk/checkin', {
+      headers: { 'x-forwarded-for': 'not an ip, 10.0.0.9' },
+    });
+    expect(getClientIp(req)).toBe('unknown');
+  });
+
+  it('rejects an oversized x-forwarded-for hop and falls back to "unknown"', () => {
+    const req = new Request('http://kiosk.test/api/kiosk/checkin', {
+      headers: { 'x-forwarded-for': 'a'.repeat(46) },
+    });
+    expect(getClientIp(req)).toBe('unknown');
+  });
+
+  it('accepts a well-formed IPv6 x-forwarded-for hop at the length boundary', () => {
+    const ipv6 = '2001:0db8:0000:0000:0000:ff00:0042:8329'; // 39 chars, well under the 45 cap
+    const req = new Request('http://kiosk.test/api/kiosk/checkin', {
+      headers: { 'x-forwarded-for': ipv6 },
+    });
+    expect(getClientIp(req)).toBe(ipv6);
+  });
+
+  it('does not warn in non-production when falling through to x-forwarded-for or "unknown"', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubEnv('NODE_ENV', 'test');
+    getClientIp(new Request('http://kiosk.test/api/kiosk/checkin'));
+    expect(warnSpy).not.toHaveBeenCalled();
+  });
+
+  it('warns once in production when falling through to x-forwarded-for', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubEnv('NODE_ENV', 'production');
+    const req = new Request('http://kiosk.test/api/kiosk/checkin', {
+      headers: { 'x-forwarded-for': '10.0.0.5' },
+    });
+    expect(getClientIp(req)).toBe('10.0.0.5');
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+
+  it('warns twice in production when falling all the way through to "unknown"', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubEnv('NODE_ENV', 'production');
+    const req = new Request('http://kiosk.test/api/kiosk/checkin');
+    expect(getClientIp(req)).toBe('unknown');
+    expect(warnSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not warn in production when x-nf-client-connection-ip is present', () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.stubEnv('NODE_ENV', 'production');
+    const req = new Request('http://kiosk.test/api/kiosk/checkin', {
+      headers: { 'x-nf-client-connection-ip': '10.0.0.1' },
+    });
+    expect(getClientIp(req)).toBe('10.0.0.1');
+    expect(warnSpy).not.toHaveBeenCalled();
   });
 });
