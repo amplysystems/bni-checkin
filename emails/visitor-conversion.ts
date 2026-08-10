@@ -11,6 +11,7 @@
 // report, rather than this template re-deriving it.
 
 import { MEETING_LINE, VENUE_LINE_1, VENUE_LINE_2 } from './visitor-thankyou';
+import { escapeHtml } from './escape-html';
 
 export type VisitorConversionInput = {
   firstName: string;
@@ -33,9 +34,12 @@ export function visitorConversionSubject(firstName: string, industry: string | n
   return seat ? `The ${seat} seat is still open, ${firstName}` : `A seat is still open for you, ${firstName}`;
 }
 
-function seatSentence(industry: string | null): string {
+// `escape` defaults to identity for the plain-text template; the HTML
+// template passes escapeHtml so only the person-supplied industry
+// substitution gets escaped, not the surrounding static wording.
+function seatSentence(industry: string | null, escape: (s: string) => string = (s) => s): string {
   const seat = industryOrNull(industry);
-  return seat ? `The ${seat} seat at Wheeling is still open` : 'Your seat at Wheeling is still open';
+  return seat ? `The ${escape(seat)} seat at Wheeling is still open` : 'Your seat at Wheeling is still open';
 }
 
 export function visitorConversionHtml(
@@ -54,8 +58,8 @@ export function visitorConversionHtml(
       <div style="padding:28px;">
         <p style="margin:0 0 6px;font-size:23px;font-weight:800;letter-spacing:-0.5px;color:#101014;">Twice now.</p>
         <div style="width:44px;height:3px;background:#CF2030;margin:0 0 16px;"></div>
-        <p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#3c3c43;">${firstName} &mdash; you&rsquo;ve seen the room twice, and the room noticed. So here&rsquo;s the part of BNI that matters most:</p>
-        <p style="margin:0 0 14px;font-size:15px;line-height:1.6;font-weight:600;color:#101014;">One seat per industry. ${seatSentence(industry)} &mdash; and once it&rsquo;s filled, every referral in this room goes to whoever holds it.</p>
+        <p style="margin:0 0 14px;font-size:15px;line-height:1.6;color:#3c3c43;">${escapeHtml(firstName)} &mdash; you&rsquo;ve seen the room twice, and the room noticed. So here&rsquo;s the part of BNI that matters most:</p>
+        <p style="margin:0 0 14px;font-size:15px;line-height:1.6;font-weight:600;color:#101014;">One seat per industry. ${seatSentence(industry, escapeHtml)} &mdash; and once it&rsquo;s filled, every referral in this room goes to whoever holds it.</p>
         <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#3c3c43;">${activeMemberCount} founding members have already claimed theirs. They&rsquo;re across the table every Wednesday, passing business to each other on purpose.</p>
         <div style="background:#f7f7f9;border-radius:10px;padding:14px 18px;margin:0 0 20px;">
           <p style="margin:0;font-size:14px;font-weight:700;color:#101014;">BNI Wheeling &middot; weekly meeting</p>

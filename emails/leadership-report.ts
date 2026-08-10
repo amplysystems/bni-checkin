@@ -7,6 +7,8 @@
 // Same email-client constraints as the other templates (inline styles,
 // system font stack, absolute image URLs).
 
+import { escapeHtml } from './escape-html';
+
 const FONT = "-apple-system,'Segoe UI',Roboto,Helvetica,Arial,sans-serif";
 
 export type LeadershipReportVisitor = {
@@ -49,20 +51,25 @@ function roadToGoalBar(activeMemberCount: number, membershipGoal: number): strin
         </div>`;
 }
 
+// `names` are always person-supplied (roster/attendance display names).
 function nameList(names: string[], emptyLabel: string): string {
   if (names.length === 0) return `<p style="margin:0;font-size:14px;color:#8a8a92;">${emptyLabel}</p>`;
-  return `<p style="margin:0;font-size:14px;line-height:1.7;color:#3c3c43;">${names.join(', ')}</p>`;
+  return `<p style="margin:0;font-size:14px;line-height:1.7;color:#3c3c43;">${names.map(escapeHtml).join(', ')}</p>`;
 }
 
 function visitorRow(v: LeadershipReportVisitor): string {
   const badge = v.visitNumber !== null && v.visitNumber >= 2
     ? `<span style="display:inline-block;margin-left:8px;background:#fdecee;color:#CF2030;font-size:11px;font-weight:700;padding:2px 8px;border-radius:999px;">Visit #${v.visitNumber} &middot; talk membership</span>`
     : '';
-  const contact = [v.email ?? 'no email on file', v.phone].filter(Boolean).join(' &middot; ');
+  const email = v.email !== null ? escapeHtml(v.email) : 'no email on file';
+  const phone = v.phone ? escapeHtml(v.phone) : null;
+  const contact = [email, phone].filter(Boolean).join(' &middot; ');
+  const industry = v.industry !== null ? escapeHtml(v.industry) : 'Industry not on file';
+  const company = v.company ? ` &middot; ${escapeHtml(v.company)}` : '';
   return `
         <div style="padding:10px 0;border-bottom:1px solid #ececf0;">
-          <p style="margin:0;font-size:14px;font-weight:700;color:#101014;">${v.name}${badge}</p>
-          <p style="margin:2px 0 0;font-size:13px;color:#55555e;">${v.industry ?? 'Industry not on file'}${v.company ? ` &middot; ${v.company}` : ''}</p>
+          <p style="margin:0;font-size:14px;font-weight:700;color:#101014;">${escapeHtml(v.name)}${badge}</p>
+          <p style="margin:2px 0 0;font-size:13px;color:#55555e;">${industry}${company}</p>
           <p style="margin:2px 0 0;font-size:13px;color:#8a8a92;">${contact}</p>
         </div>`;
 }
@@ -78,7 +85,7 @@ export function leadershipReportHtml(data: LeadershipReportData): string {
     : '<p style="margin:0;font-size:14px;color:#8a8a92;">No visitors this week.</p>';
 
   const skippedHtml = data.skippedVisitorEmails.length > 0
-    ? `<p style="margin:12px 0 0;font-size:12px;color:#8a8a92;">No email on file (not sent a thank-you): ${data.skippedVisitorEmails.join(', ')}</p>`
+    ? `<p style="margin:12px 0 0;font-size:12px;color:#8a8a92;">No email on file (not sent a thank-you): ${data.skippedVisitorEmails.map(escapeHtml).join(', ')}</p>`
     : '';
 
   return `<!DOCTYPE html>

@@ -19,6 +19,7 @@ import { OWNER_EMAIL } from './constants';
 
 export type SendableMessage = {
   type: 'leadership_report' | 'visitor_thankyou';
+  sendKey: string;
   recipients: string[];
   subject: string;
   html: string;
@@ -83,6 +84,12 @@ export async function sendEmailMessage(message: SendableMessage, now: Date = new
     headers: {
       Authorization: `Bearer ${process.env.AUTH_RESEND_KEY}`,
       'Content-Type': 'application/json',
+      // Stable across every retry attempt for this message (it's the
+      // email_messages.send_key, not per-attempt) — if a request times out
+      // AFTER Resend already accepted it, the retry in
+      // lib/emails/engine.ts's sendWithRetry dedupes at Resend instead of
+      // actually double-delivering to the recipient.
+      'Idempotency-Key': message.sendKey,
     },
     body: JSON.stringify({
       from: process.env.EMAIL_FROM ?? RESEND_DEV_FALLBACK,

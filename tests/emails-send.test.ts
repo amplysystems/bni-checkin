@@ -14,6 +14,7 @@ function mockFetchOk(id = 'resend-msg-1') {
 function baseMessage(overrides: Partial<SendableMessage> = {}): SendableMessage {
   return {
     type: 'visitor_thankyou',
+    sendKey: 'meeting-1:visitor_thankyou:person-1',
     recipients: ['visitor@example.com'],
     subject: 'Great meeting you today, Dana',
     html: '<p>hi</p>',
@@ -111,6 +112,18 @@ describe('lib/emails/send', () => {
     await sendEmailMessage(baseMessage({ type: 'leadership_report' }));
     body = JSON.parse(fetchMock.mock.calls[0][1].body);
     expect(body.attachments).toBeUndefined();
+  });
+
+  it('sends the send_key as the Idempotency-Key header, stable regardless of SAFE_MODE', async () => {
+    const fetchMock = mockFetchOk();
+    vi.stubGlobal('fetch', fetchMock);
+    await sendEmailMessage(baseMessage({ sendKey: 'meeting-42:visitor_thankyou:person-7' }));
+    expect(fetchMock.mock.calls[0][1].headers['Idempotency-Key']).toBe('meeting-42:visitor_thankyou:person-7');
+
+    fetchMock.mockClear();
+    vi.stubEnv('EMAIL_SAFE_MODE', '1'); // recipient/subject get rewritten; the key must not change
+    await sendEmailMessage(baseMessage({ sendKey: 'meeting-42:visitor_thankyou:person-7' }));
+    expect(fetchMock.mock.calls[0][1].headers['Idempotency-Key']).toBe('meeting-42:visitor_thankyou:person-7');
   });
 
   it('sets Reply-To to the owner address', async () => {

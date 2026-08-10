@@ -199,6 +199,7 @@ async function claimFromAnyPreSendState(db: Db, id: string): Promise<EmailMessag
 function toSendable(message: EmailMessage): SendableMessage {
   return {
     type: message.type,
+    sendKey: message.sendKey,
     recipients: message.recipients,
     subject: message.subject,
     html: message.bodySnapshot ?? '',

@@ -5,6 +5,8 @@
 // Sent by the Phase 2 engine at ~5:30 PM CT on meeting days; reply-to is a
 // human inbox by design.
 
+import { escapeHtml } from './escape-html';
+
 export type VisitorThankyouInput = {
   firstName: string;
   siteUrl: string; // e.g. https://bni-checkin-wheeling.netlify.app — no trailing slash
@@ -34,7 +36,7 @@ export function visitorThankyouHtml({ firstName, siteUrl }: VisitorThankyouInput
       <div style="padding:28px;">
         <p style="margin:0 0 6px;font-size:23px;font-weight:800;letter-spacing:-0.5px;color:#101014;">It was great meeting you today.</p>
         <div style="width:44px;height:3px;background:#CF2030;margin:0 0 16px;"></div>
-        <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#3c3c43;">${firstName} &mdash; thanks for visiting BNI Wheeling. The room is better when new faces show up, and yours was a good one to have across the table.</p>
+        <p style="margin:0 0 12px;font-size:15px;line-height:1.6;color:#3c3c43;">${escapeHtml(firstName)} &mdash; thanks for visiting BNI Wheeling. The room is better when new faces show up, and yours was a good one to have across the table.</p>
         <p style="margin:0 0 20px;font-size:15px;line-height:1.6;color:#3c3c43;">We meet every week, and we&rsquo;d love to see you again &mdash; as our guest, no strings.</p>
         <div style="background:#f7f7f9;border-radius:10px;padding:14px 18px;margin:0 0 20px;">
           <p style="margin:0;font-size:14px;font-weight:700;color:#101014;">BNI Wheeling &middot; weekly meeting</p>

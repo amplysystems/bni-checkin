@@ -142,6 +142,35 @@ describe('compileForMeeting', () => {
     expect(draft.html).toContain('Your seat at Wheeling is still open');
   });
 
+  it('HTML-escapes a maliciously-named visitor in both the report and the conversion email', async () => {
+    const priorWeek = new Date('2026-08-05T19:00:00Z');
+    const maliciousName = '<img src=x onerror=1>';
+    const { person } = await registerVisitor(db, {
+      fullName: maliciousName, industry: 'Plumbing', company: null,
+      email: 'xss@example.com', phone: null, clientOpId: 'xss-1', now: priorWeek,
+    });
+    const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
+    const second = await checkIn(db, { personId: person!.id, clientOpId: 'xss-2', source: 'kiosk', now: TARGET_NOW });
+    expect(second.attendance.visitNumber).toBe(2); // -> v2 conversion template
+
+    const { drafts } = await compileForMeeting(db, meeting.id);
+    const report = drafts.find((d) => d.type === 'leadership_report')!;
+    const conversion = drafts.find((d): d is VisitorThankyouDraft => d.type === 'visitor_thankyou')!;
+    expect(conversion.isConversion).toBe(true);
+
+    for (const html of [report.html, conversion.html]) {
+      expect(html).not.toContain('<img src=x onerror=1>');
+      // Each template has exactly one legitimate <img> (the BNI logo) —
+      // confirm no ADDITIONAL <img appears from the unescaped visitor name.
+      expect((html.match(/<img /g) ?? []).length).toBe(1);
+    }
+    expect(report.html).toContain('&lt;img src=x onerror=1&gt;');
+    // firstNameOf() truncates to the first whitespace-delimited token
+    // ("<img"), which is exactly why escaping the truncated value still
+    // matters — it's still an open angle bracket.
+    expect(conversion.html).toContain('&lt;img');
+  });
+
   it('a present visitor with no email is skipped from thank-you drafts but listed in the report', async () => {
     const meeting = await getOrCreateMeetingFor(db, TARGET_NOW);
     const [noEmailPerson] = await db.insert(people).values({ fullName: 'No Email Visitor', industry: 'Dentist' }).returning();
