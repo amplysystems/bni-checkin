@@ -245,4 +245,69 @@ describe('kiosk API', () => {
     const body = await res.json();
     expect(body.error).toBe('op_conflict');
   });
+
+  // Rate limiting (Task 1, phase 2): all requests below share one IP bucket
+  // ('unknown') since `post()` sends no x-nf-client-connection-ip /
+  // x-forwarded-for headers — that's fine, it isolates per-test via the
+  // fresh PGlite db each beforeEach creates. The limiter runs before body
+  // validation in every route, so a structurally-valid-but-nonexistent id
+  // is enough to exercise it without needing extra seeded rows.
+  it('checkin route enforces the 40/hour per-IP limit and 429s with {error:"rate_limited"}', async () => {
+    const unknownPersonId = '00000000-0000-0000-0000-000000000000';
+    let last;
+    for (let i = 0; i < 40; i++) {
+      last = await checkinPOST(post('/api/kiosk/checkin', {
+        personId: unknownPersonId, clientOpId: `rl-checkin-${i}-padded`,
+      }));
+    }
+    expect(last!.status).toBe(400); // 40th request still under budget (fails validation, not the limiter)
+
+    const blocked = await checkinPOST(post('/api/kiosk/checkin', {
+      personId: unknownPersonId, clientOpId: 'rl-checkin-over-padded',
+    }));
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toEqual({ error: 'rate_limited' });
+  });
+
+  it('undo route enforces the 40/hour per-IP limit and 429s with {error:"rate_limited"}', async () => {
+    const unknownAttendanceId = '00000000-0000-0000-0000-000000000000';
+    let last;
+    for (let i = 0; i < 40; i++) {
+      last = await undoPOST(post('/api/kiosk/undo', { attendanceId: unknownAttendanceId }));
+    }
+    expect(last!.status).toBe(200); // 40th request still under budget
+
+    const blocked = await undoPOST(post('/api/kiosk/undo', { attendanceId: unknownAttendanceId }));
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toEqual({ error: 'rate_limited' });
+  });
+
+  it('visitor route enforces the 5/hour per-IP limit and 429s with {error:"rate_limited"}', async () => {
+    let last;
+    for (let i = 0; i < 5; i++) {
+      last = await visitorPOST(post('/api/kiosk/visitor', { fullName: '' }));
+    }
+    expect(last!.status).toBe(400); // 5th request still under budget (fails validation, not the limiter)
+
+    const blocked = await visitorPOST(post('/api/kiosk/visitor', { fullName: '' }));
+    expect(blocked.status).toBe(429);
+    expect(await blocked.json()).toEqual({ error: 'rate_limited' });
+  });
+
+  it('rate limits are isolated per IP: a second IP is unaffected by the first maxing out', async () => {
+    const unknownAttendanceId = '00000000-0000-0000-0000-000000000000';
+    function postFrom(ip: string) {
+      return new Request('http://kiosk.test/api/kiosk/undo', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', 'x-nf-client-connection-ip': ip },
+        body: JSON.stringify({ attendanceId: unknownAttendanceId }),
+      });
+    }
+    for (let i = 0; i < 40; i++) await undoPOST(postFrom('1.1.1.1'));
+    const blockedFirstIp = await undoPOST(postFrom('1.1.1.1'));
+    expect(blockedFirstIp.status).toBe(429);
+
+    const secondIp = await undoPOST(postFrom('2.2.2.2'));
+    expect(secondIp.status).toBe(200);
+  });
 });

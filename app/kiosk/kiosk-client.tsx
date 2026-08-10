@@ -65,6 +65,7 @@ const emptyVisitorForm: VisitorFormState = {
 
 const GENERIC_ERROR = "Something went wrong — try again.";
 const VOIDED_MESSAGE = 'Check-in was undone earlier — see an organizer';
+const RATE_LIMITED_MESSAGE = 'Too many tries — give it a minute.';
 
 // Timing knobs, named so the setTimeout/setInterval calls below read as
 // intent rather than magic numbers.
@@ -790,7 +791,7 @@ export default function KioskClient() {
     const result = await postJson<CheckinApiResponse>('/api/kiosk/checkin', { personId, clientOpId });
     setPendingId(null);
     if (!result.ok) {
-      showToast(GENERIC_ERROR);
+      showToast(result.status === 429 ? RATE_LIMITED_MESSAGE : GENERIC_ERROR);
       return;
     }
     if (result.data.voided) {
@@ -806,7 +807,7 @@ export default function KioskClient() {
     const result = await postJson<UndoApiResponse>('/api/kiosk/undo', { attendanceId });
     setUndoing(false);
     if (!result.ok) {
-      showToast(GENERIC_ERROR);
+      showToast(result.status === 429 ? RATE_LIMITED_MESSAGE : GENERIC_ERROR);
       return;
     }
     // The route can 200 with undone: false (already voided, cross-day, or a
@@ -849,7 +850,9 @@ export default function KioskClient() {
     const result = await postJson<VisitorApiResponse>('/api/kiosk/visitor', payload);
     setVisitorSubmitting(false);
     if (!result.ok) {
-      if (result.status === 400) {
+      if (result.status === 429) {
+        showToast(RATE_LIMITED_MESSAGE);
+      } else if (result.status === 400) {
         setVisitorError('Check the highlighted fields — name, industry, and a valid email are needed.');
       } else {
         showToast(GENERIC_ERROR);

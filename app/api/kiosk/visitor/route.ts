@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { getDb } from '@/lib/db';
 import { registerVisitor, suggestMatches } from '@/lib/visitors';
+import { checkRateLimit, getClientIp, KIOSK_RATE_LIMITS } from '@/lib/rate-limit';
 
 const Body = z.object({
   fullName: z.string().trim().min(2).max(200),
@@ -13,9 +14,12 @@ const Body = z.object({
 });
 
 export async function POST(req: Request) {
+  const db = getDb();
+  const { allowed } = await checkRateLimit(db, { ip: getClientIp(req), ...KIOSK_RATE_LIMITS.visitor });
+  if (!allowed) return Response.json({ error: 'rate_limited' }, { status: 429 });
+
   const parsed = Body.safeParse(await req.json().catch(() => null));
   if (!parsed.success) return Response.json({ error: 'Invalid request' }, { status: 400 });
-  const db = getDb();
   const input = parsed.data;
 
   if (!input.confirmedNew) {

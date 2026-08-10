@@ -68,6 +68,18 @@ export const attendance = pgTable('attendance', {
   check('attendance_kind_check', sql`${t.kind} IN ('member', 'leadership', 'visitor')`),
 ]);
 
+// Per-IP request throttling for kiosk POST routes. One row per (ip, route,
+// window) — see lib/rate-limit.ts for the upsert-increment logic that keeps
+// this race-tolerant without db.transaction() (throws at runtime on
+// neon-http). Key embeds all three parts so a single PK lookup does the
+// job; window_start is read only by the opportunistic cleanup sweep, which
+// is a fine full-scan at this table's scale (no separate index needed).
+export const rateLimits = pgTable('rate_limits', {
+  key: text('key').primaryKey(),
+  count: integer('count').notNull().default(1),
+  windowStart: timestamp('window_start', { withTimezone: true }).notNull(),
+});
+
 export const emailMessages = pgTable('email_messages', {
   id: uuid('id').primaryKey().defaultRandom(),
   sendKey: text('send_key').notNull().unique(),
