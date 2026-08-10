@@ -41,10 +41,17 @@ describe('kiosk API', () => {
   it('roster returns members with fields but NEVER contact info', async () => {
     const res = await rosterGET();
     expect(res.status).toBe(200);
-    const text = JSON.stringify(await res.json());
+    const body = await res.json();
+    const text = JSON.stringify(body);
     expect(text).toContain('Jason Barrios');
+    // The leadership array (self-check-in section) rides along on the same
+    // response — this sentinel-leak test stringifies the whole body, so it
+    // already covers leadership rows for contact-info leakage too.
+    expect(text).toContain('Carey Rothbardt');
+    expect(text).toContain('Marisa');
     expect(text).not.toContain('secret-contact.test');
     expect(text).not.toContain('555-000-');
+    expect(Array.isArray(body.leadership)).toBe(true);
   });
 
   it('checkin → roster shows checked in → undo → roster shows not checked in', async () => {
@@ -63,6 +70,24 @@ describe('kiosk API', () => {
     expect(u.status).toBe(200);
     const final = await (await rosterGET()).json();
     expect(final.members.find((m: RosterMember) => m.fullName === 'Jason Barrios').checkedInAt).toBeNull();
+  });
+
+  it('checking in a leadership person reflects in roster.leadership, not members', async () => {
+    const roster = await (await rosterGET()).json();
+    const carey = roster.leadership.find((l: RosterMember) => l.fullName === 'Carey Rothbardt');
+    expect(carey).toBeTruthy();
+    expect(carey.checkedInAt).toBeNull();
+
+    const c = await (await checkinPOST(post('/api/kiosk/checkin', {
+      personId: carey.id, clientOpId: 'api-op-leadership-padded',
+    }))).json();
+    expect(c.checkedIn).toBe(true);
+
+    const after = await (await rosterGET()).json();
+    const careyAfter = after.leadership.find((l: RosterMember) => l.fullName === 'Carey Rothbardt');
+    expect(careyAfter.checkedInAt).toBeTruthy();
+    expect(careyAfter.attendanceId).toBe(c.attendanceId);
+    expect(after.members.map((m: RosterMember) => m.fullName)).not.toContain('Carey Rothbardt');
   });
 
   it('visitor registration validates input and returns no contact info', async () => {

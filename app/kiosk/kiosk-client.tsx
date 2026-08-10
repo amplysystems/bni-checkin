@@ -20,6 +20,7 @@ type RosterResponse = {
   greeting: string;
   meetingDate: string;
   members: Member[];
+  leadership: Member[];
 };
 
 type SuggestionPerson = {
@@ -175,6 +176,13 @@ function isValidEmail(s: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(s.trim());
 }
 
+// Shared by both grid roster lists (members and leadership) — `q` is
+// expected pre-trimmed/lowercased by the caller.
+function matchesQuery(m: Member, q: string): boolean {
+  const name = (m.displayName ?? m.fullName).toLowerCase();
+  return name.includes(q) || m.fullName.toLowerCase().includes(q);
+}
+
 async function postJson<T>(
   url: string,
   body: unknown,
@@ -270,7 +278,7 @@ function RailAmplyFooter() {
 // login rail — app/admin/login/page.tsx). Alternates by day-of-year using the
 // same dayOfYear() selection already used for the daily ad (dailyAdSrc in
 // KioskClient below), so it changes once a day rather than per render.
-function CampaignLine({ index }: { index: number }) {
+function CampaignLine({ index, size = 'rail' }: { index: number; size?: 'rail' | 'attract' }) {
   // text-2xl, not text-3xl: measured live against this 300px rail's usable
   // width (236px) — at text-3xl, "One plumber." (the shortest of the three
   // scripted lines) still wraps mid-phrase into "One" / "plumber." on two
@@ -286,8 +294,15 @@ function CampaignLine({ index }: { index: number }) {
   // font-black (900), not font-extrabold (800) — only 700/900 are loaded
   // for Unbounded (see app/layout.tsx), so 800 isn't an actual loaded
   // weight.
-  const className =
-    'font-display text-2xl font-black leading-tight tracking-tight text-neutral-50';
+  //
+  // size="attract": the portrait attract-loop overlay (AttractView below)
+  // isn't boxed into a 300px rail — it's centered over the full screen — so
+  // it can run considerably larger. Still responsively capped rather than a
+  // single huge size, since portrait width varies a fair bit across iPad
+  // models (iPad mini ~744px logical up to iPad Pro ~1024px).
+  const className = size === 'attract'
+    ? 'font-display text-4xl sm:text-5xl md:text-6xl font-black leading-tight tracking-tight text-neutral-50'
+    : 'font-display text-2xl font-black leading-tight tracking-tight text-neutral-50';
   if (index % 2 === 0) {
     return (
       <p className={className}>
@@ -410,6 +425,17 @@ function KioskRail({ roster, clock }: { roster: RosterResponse | null; clock: st
 // captured Tab order. That's the whole point: it must never interfere with
 // Guided Access or leave a keyboard/AT user stuck. Any pointerdown or
 // keydown anywhere on it exits back to the grid.
+//
+// Orientation-aware imagery: the iPad gets passed around table to table, so
+// portrait happens often, and the ad creatives (public/ads/) have their
+// headline baked into the image itself. A landscape-tuned object-cover crop
+// in portrait amputates that baked-in type unpredictably depending on which
+// ad is active. Landscape keeps the original full-bleed crossfade untouched
+// below; portrait instead treats the same rotating image as background
+// texture (scaled + blurred so a cropped headline can't read as a broken
+// billboard) and puts the actual message in live text (CampaignLine,
+// size="attract") over a stronger scrim — live text reflows to fit the
+// screen instead of being a fixed raster crop.
 function AttractView({ startIndex, onExit }: { startIndex: number; onExit: () => void }) {
   const reducedMotion = useSyncExternalStore(
     subscribeReducedMotion,
@@ -417,6 +443,11 @@ function AttractView({ startIndex, onExit }: { startIndex: number; onExit: () =>
     getReducedMotionServerSnapshot,
   );
   const [activeIndex, setActiveIndex] = useState(startIndex % ADS.length);
+
+  // Same day-of-year selection as the rail's CampaignLine (KioskRail above)
+  // and the splash backdrop's dailyAdSrc (KioskClient below) — changes once
+  // a day, not per attract-loop entry or render.
+  const campaignIndex = useMemo(() => dayOfYear(new Date()) % 2, []);
 
   // Advances the slideshow every CROSSFADE_MS. Skipped entirely under
   // reduced motion — that branch below renders one static image (still
@@ -428,6 +459,11 @@ function AttractView({ startIndex, onExit }: { startIndex: number; onExit: () =>
     }, CROSSFADE_MS);
     return () => clearInterval(id);
   }, [reducedMotion]);
+
+  // portrait:scale-110 portrait:blur-lg: texture, not billboard — the scale
+  // keeps the blur from revealing sharp edges at the image's own bounds.
+  // Landscape gets neither class (object-cover crop stays crisp, untouched).
+  const imageClassName = 'object-cover portrait:scale-110 portrait:blur-lg';
 
   return (
     <button
@@ -444,7 +480,7 @@ function AttractView({ startIndex, onExit }: { startIndex: number; onExit: () =>
           fill
           priority
           sizes="100vw"
-          className="object-cover"
+          className={imageClassName}
         />
       ) : (
         ADS.map((src, i) => (
@@ -455,13 +491,28 @@ function AttractView({ startIndex, onExit }: { startIndex: number; onExit: () =>
             fill
             priority={i === startIndex % ADS.length}
             sizes="100vw"
-            className={`object-cover transition-opacity duration-[1500ms] ease-in-out ${
+            className={`${imageClassName} transition-opacity duration-[1500ms] ease-in-out ${
               i === activeIndex ? 'opacity-100' : 'opacity-0'
             }`}
           />
         ))
       )}
-      <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent" />
+      {/* Landscape: original bottom-up gradient, just enough to keep the
+          "Tap anywhere" hint legible without dimming the ad's own baked-in
+          type. Portrait: the image is now blurred texture (see
+          imageClassName above), not legible copy, so it needs a stronger
+          full-bleed scrim (flat, not a gradient) to seat CampaignLine's live
+          text on top at proper contrast. */}
+      <div className="absolute inset-0 bg-gradient-to-t from-black/70 via-transparent to-transparent portrait:bg-none portrait:bg-black/60" />
+
+      {/* Portrait-only campaign message — see docblock above. `hidden
+          portrait:flex`: never mounted-but-invisible in landscape, actually
+          absent, so it can't intercept a stray tap on this button's tap-
+          anywhere-to-exit surface. */}
+      <div className="hidden portrait:flex absolute inset-0 items-center justify-center px-10 text-center">
+        <CampaignLine index={campaignIndex} size="attract" />
+      </div>
+
       <p className="absolute inset-x-0 bottom-8 text-center text-sm font-medium text-white">
         Tap anywhere to check in
       </p>
@@ -771,10 +822,20 @@ export default function KioskClient() {
     if (!roster) return [];
     const q = query.trim().toLowerCase();
     if (!q) return roster.members;
-    return roster.members.filter((m) => {
-      const name = (m.displayName ?? m.fullName).toLowerCase();
-      return name.includes(q) || m.fullName.toLowerCase().includes(q);
-    });
+    return roster.members.filter((m) => matchesQuery(m, q));
+  }, [roster, query]);
+
+  // Same filter applied to the leadership subsection. Reusing this (rather
+  // than a separate "is search active" flag) is what makes the subsection
+  // disappear while searching unless a leadership name actually matches: an
+  // empty query yields the full leadership list, a non-matching query yields
+  // an empty array, and GridView only renders the subsection when it's
+  // non-empty either way.
+  const filteredLeadership = useMemo(() => {
+    if (!roster) return [];
+    const q = query.trim().toLowerCase();
+    if (!q) return roster.leadership;
+    return roster.leadership.filter((m) => matchesQuery(m, q));
   }, [roster, query]);
 
   const nameValid = visitorForm.fullName.trim().length >= 2;
@@ -812,6 +873,7 @@ export default function KioskClient() {
               query={query}
               setQuery={setQuery}
               filteredMembers={filteredMembers}
+              filteredLeadership={filteredLeadership}
               pendingId={pendingId}
               onTapMember={(m) => performCheckIn(m.id, m.displayName ?? m.fullName)}
               onOpenVisitorForm={openVisitorForm}
@@ -883,13 +945,15 @@ export default function KioskClient() {
 // ---- Grid view ----------------------------------------------------------
 
 function GridView({
-  roster, rosterError, query, setQuery, filteredMembers, pendingId, onTapMember, onOpenVisitorForm,
+  roster, rosterError, query, setQuery, filteredMembers, filteredLeadership, pendingId, onTapMember,
+  onOpenVisitorForm,
 }: {
   roster: RosterResponse | null;
   rosterError: boolean;
   query: string;
   setQuery: (v: string) => void;
   filteredMembers: Member[];
+  filteredLeadership: Member[];
   pendingId: string | null;
   onTapMember: (m: Member) => void;
   onOpenVisitorForm: () => void;
@@ -936,6 +1000,31 @@ function GridView({
                 onTap={() => onTapMember(m)}
               />
             ))}
+          </div>
+        )}
+
+        {/* Leadership self-check-in: same MemberCard, same grid, same tap
+            handler (kind resolution happens server-side in checkIn's
+            resolveKind, keyed off the person_roles row — nothing kiosk-side
+            needs to know these are leadership rather than members). Reusing
+            filteredLeadership (rather than a separate "search active" flag)
+            for both the content AND the show/hide decision is what makes
+            this disappear while searching unless a leadership name actually
+            matches: an empty query leaves the full leadership list, and a
+            non-matching query filters it down to nothing. */}
+        {!rosterError && roster && filteredLeadership.length > 0 && (
+          <div className="mt-8">
+            <p className="text-sm text-neutral-500 dark:text-neutral-400">Chapter leadership</p>
+            <div className="mt-3 grid grid-cols-2 gap-3 sm:gap-4 lg:grid-cols-3">
+              {filteredLeadership.map((m) => (
+                <MemberCard
+                  key={m.id}
+                  member={m}
+                  pending={pendingId === m.id}
+                  onTap={() => onTapMember(m)}
+                />
+              ))}
+            </div>
           </div>
         )}
 
@@ -1065,7 +1154,22 @@ function SplashView({
           background dark right now," so a normal dark: pairing would render
           the light-mode (WCAG-failing-on-dark) color whenever the OS theme
           happens to be light, regardless of this scrim. */}
-      <Image src={adSrc} alt="" fill priority sizes="100vw" className="object-cover" />
+      {/* portrait:blur-md portrait:scale-105: same rationale as AttractView
+          above — the ad's baked-in headline can crop unpredictably in
+          portrait, so it becomes texture rather than legible copy there.
+          Lighter than AttractView's blur-lg/scale-110 since this backdrop
+          already sits under a heavy bg-black/75 scrim (unchanged, already
+          orientation-agnostic) and has no live text of its own competing for
+          space — it just needs to stop reading as cropped type, not fully
+          disappear. Landscape unchanged. */}
+      <Image
+        src={adSrc}
+        alt=""
+        fill
+        priority
+        sizes="100vw"
+        className="object-cover portrait:scale-105 portrait:blur-md"
+      />
       <div className="absolute inset-0 bg-black/75" />
 
       {/* Wrapped in one `relative` container rather than adding `relative`

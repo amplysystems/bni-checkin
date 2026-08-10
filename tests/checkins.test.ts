@@ -147,6 +147,22 @@ describe('checkIn', () => {
     expect(roster.members.map((m) => m.fullName)).not.toContain('Carey Rothbardt');
   });
 
+  it('kioskRoster returns leadership with checked-in state, excluded from members', async () => {
+    const carey = await personByName('Carey Rothbardt');
+    await checkIn(db, { personId: carey.id, clientOpId: 'op-6', source: 'kiosk', now: NOW });
+    const roster = await kioskRoster(db, NOW);
+
+    expect(roster.leadership.map((l) => l.fullName)).toEqual(['Carey Rothbardt', 'Marisa']);
+    const c = roster.leadership.find((l) => l.fullName === 'Carey Rothbardt')!;
+    expect(c.checkedInAt).toBeTruthy();
+    const marisa = roster.leadership.find((l) => l.fullName === 'Marisa')!;
+    expect(marisa.checkedInAt).toBeNull();
+
+    expect(roster.members).toHaveLength(10);
+    expect(roster.members.map((m) => m.fullName)).not.toContain('Carey Rothbardt');
+    expect(roster.members.map((m) => m.fullName)).not.toContain('Marisa');
+  });
+
   it('numbers visitor visits, excluding voided ones, per meeting date', async () => {
     const [visitor] = await db.insert(people).values({ fullName: 'Val Visitor' }).returning();
     await db.insert(memberships).values({ personId: visitor.id, status: 'visitor' });

@@ -133,16 +133,35 @@ export async function kioskRoster(db: Db, now: Date) {
     ))
     .where(isNull(people.deactivatedAt));
 
+  // Leadership self-check-in (product rationale: lets leadership check
+  // themselves in and makes the group look bigger). Same public field
+  // shape as `members` — industry/company are frequently null for these
+  // people (leadership rows aren't required to carry them) and that's
+  // fine, the kiosk card already renders without an industry line.
+  const leadership = await db.select({
+    id: people.id, fullName: people.fullName, displayName: people.displayName,
+    industry: people.industry, company: people.company,
+  }).from(people)
+    .innerJoin(personRoles, and(
+      eq(personRoles.personId, people.id),
+      eq(personRoles.role, 'leadership'),
+    ))
+    .where(isNull(people.deactivatedAt));
+
   const checked = await db.select().from(attendance).where(and(
     eq(attendance.meetingId, meeting.id), isNull(attendance.voidedAt),
   ));
   const byPerson = new Map(checked.map((c) => [c.personId, c]));
 
+  const withCheckedInState = <T extends { id: string; fullName: string }>(rows: T[]) =>
+    rows
+      .map((r) => ({ ...r, checkedInAt: byPerson.get(r.id)?.checkedInAt ?? null,
+                     attendanceId: byPerson.get(r.id)?.id ?? null }))
+      .sort((a, b) => a.fullName.localeCompare(b.fullName));
+
   return {
     meetingDate: meeting.meetingDate,
-    members: members
-      .map((m) => ({ ...m, checkedInAt: byPerson.get(m.id)?.checkedInAt ?? null,
-                     attendanceId: byPerson.get(m.id)?.id ?? null }))
-      .sort((a, b) => a.fullName.localeCompare(b.fullName)),
+    members: withCheckedInState(members),
+    leadership: withCheckedInState(leadership),
   };
 }
