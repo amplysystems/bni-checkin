@@ -91,7 +91,11 @@ const TICKER_MS = 3_500;
 
 // The four ad creatives (see public/ads/) — shared by the attract loop
 // slideshow and the splash backdrop.
-const ADS = ['/ads/hero.jpg', '/ads/deserves.jpg', '/ads/building.jpg', '/ads/ask.jpg'] as const;
+// NOTE: '/ads/ask.jpg' ("Ask him what a referral is worth") was REMOVED on
+// 2026-08-11 and must not be re-added — the member pictured withdrew consent
+// for his likeness. The file is deleted from public/ads/ and its entry is gone
+// from scripts/process-ads.ts so a regeneration can't quietly restore it.
+const ADS = ['/ads/hero.jpg', '/ads/deserves.jpg', '/ads/building.jpg'] as const;
 
 // Used to pick "the day's ad" for the splash backdrop — deterministic per
 // day (not per render), so it doesn't flicker between different check-ins

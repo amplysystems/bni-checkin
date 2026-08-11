@@ -13,7 +13,13 @@ const JOBS: { src: string; out: string }[] = [
   { src: 'C:\\Users\\barri\\OneDrive\\Desktop\\BNI\\BNI Hero.png', out: 'public/ads/hero.jpg' },
   { src: 'C:\\Users\\barri\\OneDrive\\Desktop\\BNI\\BNI = YOUR BUSINESS DESERVES.png', out: 'public/ads/deserves.jpg' },
   { src: 'C:\\Users\\barri\\OneDrive\\Desktop\\BNI\\BNI Theyre Building.png', out: 'public/ads/building.jpg' },
-  { src: 'C:\\Users\\barri\\OneDrive\\Desktop\\BNI\\BNI ASK HIM.png', out: 'public/ads/ask.jpg' },
+  // REMOVED 2026-08-11 — do not restore: "BNI ASK HIM.png" ("Ask him what a
+  // referral is worth") pictures a member who withdrew consent for his
+  // likeness. The source file still exists on the Desktop (it's Jason's
+  // asset, not ours to delete), which is exactly why this entry is commented
+  // out rather than silently dropped: re-running this script must never
+  // re-publish it. See ADS in app/kiosk/kiosk-client.tsx.
+  // { src: '...BNI ASK HIM.png', out: 'public/ads/ask.jpg' },
 ];
 
 // withoutEnlargement means a source narrower than this keeps its native

@@ -275,7 +275,19 @@ export default async function LoginPage({
         className="hidden md:flex md:w-2/5 md:flex-col md:justify-between md:px-10 md:py-10 lg:w-1/2"
         style={{ backgroundColor: RAIL_NAVY }}
       >
-        <Image src="/bni-logo-transparent.png" alt="BNI" width={160} height={90} className="h-12 w-auto" />
+        {/* self-start is load-bearing: this rail is `md:flex md:flex-col`, so
+            its default align-items:stretch stretches every direct child on the
+            CROSS axis — width, in a column. Without it, `w-auto` loses and the
+            160x90 mark is smeared across the full rail width at a fixed h-12
+            (badly distorted, reported live). The amply pill below dodges this
+            only because it carries an explicit `w-fit`. */}
+        <Image
+          src="/bni-logo-transparent.png"
+          alt="BNI"
+          width={160}
+          height={90}
+          className="h-12 w-auto self-start"
+        />
 
         {/* text-2xl (not text-4xl) below lg: measured live at the md
             breakpoint's narrowest point (768px viewport — a real iPad-
